@@ -1,5 +1,6 @@
+print "Afisam descrescator:"
+newline
 mov rdi, 5
-print "Contor curent:\n"
 bucla:
 cmp rdi, 0
 je gata
@@ -9,5 +10,6 @@ newline
 dec rdi
 jmp bucla
 gata:
-print "Gata!\n"
+print "gata!"
+newline
 exit

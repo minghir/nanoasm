@@ -4,6 +4,11 @@
 #include <string.h>
 #include <stdint.h>
 
+typedef struct {
+    char magic[4];       // "NAS1"
+    uint32_t entry_offset;
+} __attribute__((packed)) NanoHeader;
+
 // Prototypes pentru funcțiile nano folosite de nanovi
 void nano_clear_screen(void);
 void nano_print(const char* str);
@@ -20,5 +25,7 @@ static inline void itoa(int n, char* buf, int radix) {
         sprintf(buf, "%x", n);
     }
 }
+int64_t parse_int64(const char* str);
+
 
 #endif

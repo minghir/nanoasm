@@ -64,16 +64,38 @@ int nano_write_file(const char* name, const uint8_t* data, uint32_t size) {
 
 int nano_create_file(const char* name, uint32_t size) {
     FILE* f = fopen(name, "wb");
-    if (!f) return -1;
+    if (!f) return 0;
 
     if (size > 0) {
         int fd = fileno(f);
         if (ftruncate(fd, size) != 0) {
             fclose(f);
-            return -1;
+            return 0;
         }
     }
     
     fclose(f);
-    return 0;
+    return 1;
+}
+
+
+// Funcție custom pentru a converti string la int64_t (fără dependențe de atoll din libc)
+int64_t parse_int64(const char* str) {
+    int64_t res = 0;
+    int sign = 1;
+    int i = 0;
+    
+    if (str[0] == '-') {
+        sign = -1;
+        i = 1;
+    } else if (str[0] == '+') {
+        i = 1;
+    }
+    
+    while (str[i] >= '0' && str[i] <= '9') {
+        res = res * 10 + (str[i] - '0');
+        i++;
+    }
+    
+    return res * sign;
 }
