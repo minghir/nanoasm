@@ -26,6 +26,11 @@ static inline void itoa(int n, char* buf, int radix) {
     }
 }
 int64_t parse_int64(const char* str);
+void* nano_malloc(uint32_t size);
 
+void nano_free(void* ptr);
+
+// Dacă ai nevoie de citire de fișiere direct într-un singur apel
+int nano_read_file_host(const char* name, uint8_t* buffer, uint32_t max_size);
 
 #endif

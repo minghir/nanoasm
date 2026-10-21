@@ -64,20 +64,23 @@ int nano_write_file(const char* name, const uint8_t* data, uint32_t size) {
 
 int nano_create_file(const char* name, uint32_t size) {
     FILE* f = fopen(name, "wb");
-    if (!f) return 0;
+    if (!f) {
+        perror("[Host Error] fopen a esuat pentru fisierul de iesire");
+        return -1;
+    }
 
     if (size > 0) {
         int fd = fileno(f);
         if (ftruncate(fd, size) != 0) {
+            perror("[Host Error] ftruncate a esuat");
             fclose(f);
-            return 0;
+            return -1;
         }
     }
     
     fclose(f);
-    return 1;
+    return 0;
 }
-
 
 // Funcție custom pentru a converti string la int64_t (fără dependențe de atoll din libc)
 int64_t parse_int64(const char* str) {
@@ -98,4 +101,18 @@ int64_t parse_int64(const char* str) {
     }
     
     return res * sign;
+}
+
+
+void* nano_malloc(uint32_t size) {
+    return malloc(size);
+}
+
+void nano_free(void* ptr) {
+    free(ptr);
+}
+
+// Dacă ai nevoie de citire de fișiere direct într-un singur apel
+int nano_read_file_host(const char* name, uint8_t* buffer, uint32_t max_size) {
+    return nano_read_file(name, buffer, max_size);
 }
