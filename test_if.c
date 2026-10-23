@@ -1,10 +1,5 @@
 int main(){
-
-int x = 5;
-int y = 10;
-
-if(x=20) print(x); 
-
-while(x=1) print(x);
-
+float z=25.44
+if(z==25.44) print(z); 
+else print("airea");
 }
