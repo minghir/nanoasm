@@ -2,9 +2,10 @@
 
 typedef enum {
     TOKEN_EOF = 0, TOKEN_CHAR_KW, TOKEN_INT_KW, TOKEN_FLOAT_KW, TOKEN_PRINT_KW, TOKEN_IF_KW, TOKEN_ELSE_KW, TOKEN_WHILE_KW, TOKEN_FOR_KW, TOKEN_IDENTIFIER, 
-    TOKEN_NUMBER, TOKEN_FLOAT_NUMBER, TOKEN_STRING, TOKEN_ASSIGN, 
+    TOKEN_NUMBER, TOKEN_FLOAT_NUMBER, TOKEN_STRING, TOKEN_CHAR_LITERAL, TOKEN_ASSIGN, 
     TOKEN_EQ, TOKEN_NE, TOKEN_GT, TOKEN_LT, TOKEN_GE, TOKEN_LE,
     TOKEN_SEMICOLON, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE,
+	TOKEN_LBRACKET, TOKEN_RBRACKET,
     TOKEN_AND, TOKEN_OR, TOKEN_NOT, TOKEN_AMPERSAND,
     TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_MOD, TOKEN_UNKNOWN
 } TokenType;
@@ -18,8 +19,10 @@ typedef struct {
     char name[32];
     int is_float;
     int is_pointer;
-	int is_char;
+    int is_char;
     int pointer_level;
+	int is_array;     // 1 dacă este tablou
+    int array_size;   // numărul de elemente
 } Variable;
 
 static const char* src_ptr = 0;
@@ -42,20 +45,83 @@ void parse_term();
 void parse_factor();
 void parse_statement();
 
-void register_variable(const char* name, int is_float, int is_pointer) {
+void register_variable(const char* name, int is_float, int is_pointer, int pointer_level, int is_char) {
     for (int i = 0; i < var_count; i++) {
         if (strcmp(var_table[i].name, name) == 0) return;
     }
     strcpy(var_table[var_count].name, name);
     var_table[var_count].is_float = is_float;
     var_table[var_count].is_pointer = is_pointer;
-    var_table[var_count].pointer_level = 0;
+    var_table[var_count].pointer_level = pointer_level;
+    var_table[var_count].is_char = is_char;
     var_count++;
+}
+
+void register_array(const char* name, int is_float, int is_char, int size) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) return;
+    }
+    strcpy(var_table[var_count].name, name);
+    var_table[var_count].is_float = is_float;
+    var_table[var_count].is_char = is_char;
+    var_table[var_count].is_array = 1;
+    var_table[var_count].array_size = size;
+    var_count++;
+}
+
+int is_var_array(const char* name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) return var_table[i].is_array;
+    }
+    return 0;
+}
+
+int get_var_pointer_level(const char* name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) return var_table[i].pointer_level;
+    }
+    return 0;
+}
+
+int is_var_base_float(const char* name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) return var_table[i].is_float;
+    }
+    return 0;
+}
+
+int is_var_base_char(const char* name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) return var_table[i].is_char;
+    }
+    return 0;
+}
+
+int is_var_char(const char* name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) {
+            if (var_table[i].is_pointer) return 0;
+            return var_table[i].is_char;
+        }
+    }
+    return 0;
+}
+
+int is_deref_float(const char* name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) {
+            return var_table[i].is_pointer && var_table[i].is_float;
+        }
+    }
+    return 0;
 }
 
 int is_var_float(const char* name) {
     for (int i = 0; i < var_count; i++) {
-        if (strcmp(var_table[i].name, name) == 0) return var_table[i].is_float;
+        if (strcmp(var_table[i].name, name) == 0) {
+            if (var_table[i].is_pointer) return 0;
+            return var_table[i].is_float;
+        }
     }
     return 0;
 }
@@ -88,15 +154,49 @@ void parse_float_factor() {
     Token t = get_next_token();
     if (t.type == TOKEN_NUMBER || t.type == TOKEN_FLOAT_NUMBER) {
         uint32_t u = float_to_u32(t.text);
-        register_variable("tmp_float", 1, 0);
+        register_variable("tmp_float", 1, 0, 0, 0);
         append_str(asm_out, &asm_idx, "    mov rax, ");
         append_int(asm_out, &asm_idx, (int)u);
         append_str(asm_out, &asm_idx, "\n    mov [var_tmp_float], rax\n");
         append_str(asm_out, &asm_idx, "    movss xmm0, [var_tmp_float]\n");
     } else if (t.type == TOKEN_IDENTIFIER) {
-        append_str(asm_out, &asm_idx, "    movss xmm0, [var_");
-        append_str(asm_out, &asm_idx, t.text);
+        const char* saved_ptr = src_ptr;
+        Token next = get_next_token();
+        
+        if (next.type == TOKEN_LBRACKET) {
+            parse_expr(); // Indexul i -> RAX
+            get_next_token(); // Consumă ']'
+            
+            append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
+            append_str(asm_out, &asm_idx, "    imul rbx\n");
+            append_str(asm_out, &asm_idx, "    lea rbx, [var_");
+            append_str(asm_out, &asm_idx, t.text);
+            append_str(asm_out, &asm_idx, "]\n");
+            append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+            append_str(asm_out, &asm_idx, "    movss xmm0, [rax]\n"); // Citim float-ul
+        } else {
+            src_ptr = saved_ptr;
+            append_str(asm_out, &asm_idx, "    movss xmm0, [var_");
+            append_str(asm_out, &asm_idx, t.text);
+            append_str(asm_out, &asm_idx, "]\n");
+        }
+    } else if (t.type == TOKEN_STAR) {
+        int star_count = 1;
+        Token next = get_next_token();
+        while (next.type == TOKEN_STAR) {
+            star_count++;
+            next = get_next_token();
+        }
+        Token var_tok = next;
+        
+        append_str(asm_out, &asm_idx, "    mov rax, [var_");
+        append_str(asm_out, &asm_idx, var_tok.text);
         append_str(asm_out, &asm_idx, "]\n");
+        
+        for (int i = 0; i < star_count - 1; i++) {
+            append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+        }
+        append_str(asm_out, &asm_idx, "    movss xmm0, [rax]\n");
     } else if (t.type == TOKEN_LPAREN) {
         parse_float_expr();
         get_next_token();
@@ -109,7 +209,7 @@ void parse_float_term() {
         const char* saved_ptr = src_ptr;
         Token op = get_next_token();
         if (op.type == TOKEN_STAR || op.type == TOKEN_SLASH) {
-            register_variable("tmp_f1", 1, 0);
+            register_variable("tmp_f1", 1, 0, 0, 0);
             append_str(asm_out, &asm_idx, "    movss [var_tmp_f1], xmm0\n");
             parse_float_factor();
             append_str(asm_out, &asm_idx, "    movss xmm1, xmm0\n");
@@ -132,7 +232,7 @@ void parse_float_expr() {
         const char* saved_ptr = src_ptr;
         Token op = get_next_token();
         if (op.type == TOKEN_PLUS || op.type == TOKEN_MINUS) {
-            register_variable("tmp_f2", 1, 0);
+            register_variable("tmp_f2", 1, 0, 0, 0);
             append_str(asm_out, &asm_idx, "    movss [var_tmp_f2], xmm0\n");
             parse_float_term();
             append_str(asm_out, &asm_idx, "    movss xmm1, xmm0\n");
@@ -151,26 +251,52 @@ void parse_float_expr() {
 
 void parse_factor() {
     Token t = get_next_token();
-    if (t.type == TOKEN_NUMBER) {
+    if (t.type == TOKEN_NUMBER || t.type == TOKEN_CHAR_LITERAL) {
         append_str(asm_out, &asm_idx, "    mov rax, ");
         append_str(asm_out, &asm_idx, t.text);
         append_str(asm_out, &asm_idx, "\n");
     } else if (t.type == TOKEN_IDENTIFIER) {
-        append_str(asm_out, &asm_idx, "    mov rax, [var_");
-        append_str(asm_out, &asm_idx, t.text);
-        append_str(asm_out, &asm_idx, "]\n");
+        const char* saved_ptr = src_ptr;
+        Token next = get_next_token();
+        
+        if (next.type == TOKEN_LBRACKET) {
+            parse_expr(); // Indexul i -> RAX
+            get_next_token(); // Consumă ']'
+            
+            append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
+            append_str(asm_out, &asm_idx, "    imul rbx\n");
+            append_str(asm_out, &asm_idx, "    lea rbx, [var_");
+            append_str(asm_out, &asm_idx, t.text);
+            append_str(asm_out, &asm_idx, "]\n");
+            append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+            append_str(asm_out, &asm_idx, "    mov rax, [rax]\n"); // Citim valoarea
+        } else {
+            src_ptr = saved_ptr;
+            append_str(asm_out, &asm_idx, "    mov rax, [var_");
+            append_str(asm_out, &asm_idx, t.text);
+            append_str(asm_out, &asm_idx, "]\n");
+        }
     } else if (t.type == TOKEN_AMPERSAND) {
         Token var_tok = get_next_token();
         append_str(asm_out, &asm_idx, "    lea rax, [var_");
         append_str(asm_out, &asm_idx, var_tok.text);
         append_str(asm_out, &asm_idx, "]\n");
     } else if (t.type == TOKEN_STAR) {
-        // NOU: Operatorul * de dereferențiere
-        Token var_tok = get_next_token();
+        int star_count = 1;
+        Token next = get_next_token();
+        while (next.type == TOKEN_STAR) {
+            star_count++;
+            next = get_next_token();
+        }
+        Token var_tok = next;
+        
         append_str(asm_out, &asm_idx, "    mov rax, [var_");
         append_str(asm_out, &asm_idx, var_tok.text);
         append_str(asm_out, &asm_idx, "]\n");
-        append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+        
+        for (int i = 0; i < star_count; i++) {
+            append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+        }
     } else if (t.type == TOKEN_LPAREN) {
         parse_expr();
         get_next_token();
@@ -304,7 +430,7 @@ void emit_condition_eval(Token var1_tok, Token op_tok, Token val2_tok,
 
         if (val2_tok.type == TOKEN_NUMBER || val2_tok.type == TOKEN_FLOAT_NUMBER) {
             uint32_t u = float_to_u32(val2_tok.text);
-            register_variable("tmp_float", 1, 0);
+            register_variable("tmp_float", 1, 0, 0, 0);
             append_str(asm_out, &asm_idx, "    mov rax, ");
             append_int(asm_out, &asm_idx, (int)u);
             append_str(asm_out, &asm_idx, "\n    mov [var_tmp_float], rax\n");
@@ -382,14 +508,31 @@ Token get_next_token() {
 
     char c = *src_ptr;
 
+    if (c == '\'') {
+        src_ptr++;
+        char char_val = *src_ptr++;
+        if (char_val == '\\') {
+            char esc = *src_ptr++;
+            if (esc == 'n') char_val = '\n';
+            else if (esc == 't') char_val = '\t';
+            else if (esc == '0') char_val = '\0';
+            else char_val = esc;
+        }
+        if (*src_ptr == '\'') src_ptr++;
+        
+        itoa((int)(unsigned char)char_val, token.text, 10);
+        token.type = TOKEN_CHAR_LITERAL;
+        return token;
+    }
+
     if (is_alpha(c)) {
         int i = 0;
         while (is_alnum(*src_ptr) && i < 63) {
             token.text[i++] = *src_ptr++;
         }
         token.text[i] = '\0';
-		
-		if (str_eq(token.text, "char")) token.type = TOKEN_CHAR_KW;
+        
+        if (str_eq(token.text, "char")) token.type = TOKEN_CHAR_KW;
         else if (str_eq(token.text, "int")) token.type = TOKEN_INT_KW;
         else if (str_eq(token.text, "float")) token.type = TOKEN_FLOAT_KW;
         else if (str_eq(token.text, "print")) token.type = TOKEN_PRINT_KW;
@@ -470,6 +613,8 @@ Token get_next_token() {
         case '*': token.type = TOKEN_STAR; break;
         case '/': token.type = TOKEN_SLASH; break;
         case '%': token.type = TOKEN_MOD; break;
+		case '[': token.type = TOKEN_LBRACKET; break;
+        case ']': token.type = TOKEN_RBRACKET; break;
         default:  token.type = TOKEN_UNKNOWN; break;
     }
     
@@ -494,107 +639,200 @@ void parse_statement_token(Token t) {
             inner = get_next_token();
         }
     }
-    else if (t.type == TOKEN_INT_KW) {
+    else if (t.type == TOKEN_INT_KW || t.type == TOKEN_FLOAT_KW || t.type == TOKEN_CHAR_KW) {
+        int is_float = (t.type == TOKEN_FLOAT_KW);
+        int is_char  = (t.type == TOKEN_CHAR_KW);
         Token next_tok = get_next_token();
         int is_ptr = 0;
+        int ptr_level = 0;
         
-        if (next_tok.type == TOKEN_STAR) {
+        while (next_tok.type == TOKEN_STAR) {
             is_ptr = 1;
-            next_tok = get_next_token(); 
+            ptr_level++;
+            next_tok = get_next_token();
         }
         
         Token var_tok = next_tok;
         Token op_or_semi = get_next_token();
-        
-        if (op_or_semi.type == TOKEN_LPAREN) {
-            get_next_token(); 
-            Token brace_tok = get_next_token();
-            if (brace_tok.type == TOKEN_LBRACE) {
-                // Corpul functiei main
+
+        // Verificăm dacă este o declarare de tablou: type arr[10];
+        if (op_or_semi.type == TOKEN_LBRACKET) {
+            Token size_tok = get_next_token(); // Dimensiunea (ex: 10)
+            int array_sz = atoi(size_tok.text);
+            get_next_token(); // Consumă ']'
+            consume_semicolon();
+            
+            register_array(var_tok.text, is_float, is_char, array_sz);
+        }
+        else {
+            register_variable(var_tok.text, is_float, is_ptr, ptr_level, is_char);
+            if (op_or_semi.type == TOKEN_ASSIGN) {
+                if (is_float && ptr_level == 0) {
+                    parse_float_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    movss [var_");
+                    append_str(asm_out, &asm_idx, var_tok.text);
+                    append_str(asm_out, &asm_idx, "], xmm0\n");
+                } else {
+                    parse_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    mov [var_");
+                    append_str(asm_out, &asm_idx, var_tok.text);
+                    append_str(asm_out, &asm_idx, "], rax\n");
+                }
             }
-        } 
-        else if (op_or_semi.type == TOKEN_ASSIGN) {
-            register_variable(var_tok.text, 0, is_ptr);
-            parse_expr();
-            consume_semicolon();
-            
-            append_str(asm_out, &asm_idx, "    mov [var_");
-            append_str(asm_out, &asm_idx, var_tok.text);
-            append_str(asm_out, &asm_idx, "], rax\n");
-        }
-        else if (op_or_semi.type == TOKEN_SEMICOLON) {
-            register_variable(var_tok.text, 0, is_ptr);
-        }
-    }
-    else if (t.type == TOKEN_FLOAT_KW) {
-        Token var_tok = get_next_token();
-        register_variable(var_tok.text, 1, 0); 
-        
-        Token next_tok = get_next_token();
-        if (next_tok.type == TOKEN_ASSIGN) {
-            parse_float_expr();
-            consume_semicolon();
-            
-            append_str(asm_out, &asm_idx, "    movss [var_");
-            append_str(asm_out, &asm_idx, var_tok.text);
-            append_str(asm_out, &asm_idx, "], xmm0\n");
         }
     }
     else if (t.type == TOKEN_IDENTIFIER) {
         Token var_tok = t;
-        Token assign_tok = get_next_token();
-        if (assign_tok.type == TOKEN_ASSIGN) {
+        Token next_tok = get_next_token();
+        
+        if (next_tok.type == TOKEN_LBRACKET) {
+            // Atribuire în element de tablou: arr[i] = val;
+            parse_expr();     // Calculăm indexul i -> rezultatul în RAX
+            get_next_token(); // Consumă ']'
+            
+            // Calculăm adresa adr = &arr + i * 8
+            append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
+            append_str(asm_out, &asm_idx, "    imul rbx\n");
+            append_str(asm_out, &asm_idx, "    lea rbx, [var_");
+            append_str(asm_out, &asm_idx, var_tok.text);
+            append_str(asm_out, &asm_idx, "]\n");
+            append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+            append_str(asm_out, &asm_idx, "    push rax\n"); // Salvăm adresa &arr[i] pe stivă
+            
+            Token assign_tok = get_next_token(); // Consumă '='
+            if (assign_tok.type == TOKEN_ASSIGN) {
+                if (is_var_base_float(var_tok.text)) {
+                    parse_float_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    pop rbx\n");
+                    append_str(asm_out, &asm_idx, "    movss [rbx], xmm0\n");
+                } else {
+                    parse_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    pop rbx\n");
+                    append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
+                }
+            }
+        }
+        else if (next_tok.type == TOKEN_ASSIGN) {
             if (is_var_float(var_tok.text)) {
                 parse_float_expr();
                 consume_semicolon();
-                
                 append_str(asm_out, &asm_idx, "    movss [var_");
                 append_str(asm_out, &asm_idx, var_tok.text);
                 append_str(asm_out, &asm_idx, "], xmm0\n");
             } else {
                 parse_expr();
                 consume_semicolon();
-                
                 append_str(asm_out, &asm_idx, "    mov [var_");
                 append_str(asm_out, &asm_idx, var_tok.text);
                 append_str(asm_out, &asm_idx, "], rax\n");
             }
         }
     }
-    else if (t.type == TOKEN_PRINT_KW) {
-        get_next_token(); // '('
-        Token arg_tok = get_next_token();
+    else if (t.type == TOKEN_STAR) {
+        int star_count = 1;
+        Token next_tok = get_next_token();
+        while (next_tok.type == TOKEN_STAR) {
+            star_count++;
+            next_tok = get_next_token();
+        }
+        Token ptr_tok = next_tok;
+        Token assign_tok = get_next_token();
         
+        if (assign_tok.type == TOKEN_ASSIGN) {
+            int is_target_float = is_var_base_float(ptr_tok.text) && (get_var_pointer_level(ptr_tok.text) == star_count);
+
+            if (is_target_float) {
+                parse_float_expr();
+                consume_semicolon();
+                
+                append_str(asm_out, &asm_idx, "    mov rax, [var_");
+                append_str(asm_out, &asm_idx, ptr_tok.text);
+                append_str(asm_out, &asm_idx, "]\n");
+                
+                for (int i = 0; i < star_count - 1; i++) {
+                    append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+                }
+                append_str(asm_out, &asm_idx, "    movss [rax], xmm0\n");
+            } else {
+                parse_expr();
+                consume_semicolon();
+                
+                append_str(asm_out, &asm_idx, "    push rax\n");
+                append_str(asm_out, &asm_idx, "    mov rbx, [var_");
+                append_str(asm_out, &asm_idx, ptr_tok.text);
+                append_str(asm_out, &asm_idx, "]\n");
+                
+                for (int i = 0; i < star_count - 1; i++) {
+                    append_str(asm_out, &asm_idx, "    mov rbx, [rbx]\n");
+                }
+                
+                append_str(asm_out, &asm_idx, "    pop rax\n");
+                append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
+            }
+        }
+    }
+    else if (t.type == TOKEN_PRINT_KW) {
+        get_next_token(); // Consumă '('
+
+        const char* saved_ptr = src_ptr;
+        Token arg_tok = get_next_token();
+
         if (arg_tok.type == TOKEN_STRING) {
-            get_next_token(); // ')'
+            get_next_token(); // Consumă ')'
             consume_semicolon();
             append_str(asm_out, &asm_idx, "    print \"");
             append_str(asm_out, &asm_idx, arg_tok.text);
             append_str(asm_out, &asm_idx, "\"\n    newline\n");
         } 
-        else if (arg_tok.type == TOKEN_STAR) {
-            Token var_tok = get_next_token(); // Numele pointerului (ex: b)
-            get_next_token(); // ')'
-            consume_semicolon();
-            
-            append_str(asm_out, &asm_idx, "    mov rax, [var_");
-            append_str(asm_out, &asm_idx, var_tok.text);
-            append_str(asm_out, &asm_idx, "]\n");
-            append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
-            append_str(asm_out, &asm_idx, "    print_rax\n    newline\n");
-        }
-        else if (arg_tok.type == TOKEN_IDENTIFIER) {
-            get_next_token(); // ')'
-            consume_semicolon();
-            
-            if (is_var_float(arg_tok.text)) {
-                append_str(asm_out, &asm_idx, "    movss xmm0, [var_");
-                append_str(asm_out, &asm_idx, arg_tok.text);
-                append_str(asm_out, &asm_idx, "]\n    print_xmm\n    newline\n");
+        else {
+            int is_float_expression = 0;
+            int is_char_expression = 0;
+
+            if (arg_tok.type == TOKEN_CHAR_LITERAL) {
+                is_char_expression = 1;
+            } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_char(arg_tok.text)) {
+                is_char_expression = 1;
+            } else if (arg_tok.type == TOKEN_FLOAT_NUMBER) {
+                is_float_expression = 1;
+            } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_float(arg_tok.text)) {
+                is_float_expression = 1;
+            } else if (arg_tok.type == TOKEN_STAR) {
+                int star_count = 1;
+                Token next = get_next_token();
+                while (next.type == TOKEN_STAR) {
+                    star_count++;
+                    next = get_next_token();
+                }
+                Token var_tok = next;
+                if (is_var_base_float(var_tok.text) && (get_var_pointer_level(var_tok.text) == star_count)) {
+                    is_float_expression = 1;
+                }
+				else if (is_var_base_char(var_tok.text) && (get_var_pointer_level(var_tok.text) == star_count)) {
+                    is_char_expression = 1;
+                }
+            }
+
+            src_ptr = saved_ptr;
+
+            if (is_char_expression) {
+                parse_expr();       // Evaluează expresia (cod ASCII în RAX)
+                get_next_token();   // Consumă ')'
+                consume_semicolon();
+                append_str(asm_out, &asm_idx, "    print_char\n    newline\n");
+            } else if (is_float_expression) {
+                parse_float_expr();
+                get_next_token();   // Consumă ')'
+                consume_semicolon();
+                append_str(asm_out, &asm_idx, "    print_xmm\n    newline\n");
             } else {
-                append_str(asm_out, &asm_idx, "    mov rax, [var_");
-                append_str(asm_out, &asm_idx, arg_tok.text);
-                append_str(asm_out, &asm_idx, "]\n    print_rax\n    newline\n");
+                parse_expr();       // Evaluează expresia de întregi
+                get_next_token();   // Consumă ')'
+                consume_semicolon();
+                append_str(asm_out, &asm_idx, "    print_rax\n    newline\n");
             }
         }
     }
@@ -778,6 +1016,13 @@ int main(int argc, char** argv) {
         append_str(asm_out, &asm_idx, "var_");
         append_str(asm_out, &asm_idx, var_table[i].name);
         append_str(asm_out, &asm_idx, ": data 0\n");
+        
+        // Dacă este tablou, alocăm restul de (size - 1) sloturi contigue
+        if (var_table[i].is_array) {
+            for (int k = 1; k < var_table[i].array_size; k++) {
+                append_str(asm_out, &asm_idx, "    data 0\n");
+            }
+        }
     }
 
     asm_out[asm_idx] = '\0';

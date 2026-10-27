@@ -1,6 +1,7 @@
 #include "nano_libc.h"
 #include "elf.h"
 
+#define MAX_LABELS 512
 // Structură pentru etichete
 typedef struct {
     char name[32];
@@ -30,6 +31,19 @@ static const uint8_t itoa_linux[] = {
     0x48, 0x89, 0xCA, 0x0F, 0x05, 0x4C, 0x89, 0xC4, 0x41, // mov rdx, rcx; syscall; mov rsp, r8
     0x59, 0x41, 0x58, 0x5E, 0x5F, 0x5A, 0x59, 0x58         // pop r9, r8, rsi, rdi, rdx, rcx, rax
 };
+
+int get_reg_code(const char* name) {
+    if (strcmp(name, "rax") == 0) return 0;
+    if (strcmp(name, "rcx") == 0) return 1;
+    if (strcmp(name, "rdx") == 0) return 2;
+    if (strcmp(name, "rbx") == 0) return 3;
+    if (strcmp(name, "rsp") == 0) return 4;
+    if (strcmp(name, "rbp") == 0) return 5;
+    if (strcmp(name, "rsi") == 0) return 6;
+    if (strcmp(name, "rdi") == 0) return 7;
+    return -1;
+}
+
 
 float nano_parse_float(const char* str) {
     float result = 0.0f;
@@ -247,78 +261,133 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
         }
         return total_size;
     }
-	// --- LEA (Load Effective Address - pentru operatorul &) ---
-    if (strcmp(inst->mnemonic, "lea") == 0 && strcmp(inst->op1, "rax") == 0) {
-        char var_name[64];
-        int i = 0, j = 0;
-        // Extragem numele variabilei din paranteze: [var_x]
-        while (inst->op2[i] != '\0') {
-            if (inst->op2[i] != '[' && inst->op2[i] != ']') {
-                var_name[j++] = inst->op2[i];
-            }
-            i++;
-        }
-        var_name[j] = '\0';
+	
+	// --- PRINT_CHAR ---
+    if (strcmp(inst->mnemonic, "print_char") == 0) {
+        int total_size = g_generate_elf ? 28 : 10;
 
-        int target_offset = -1;
-        for (int l = 0; l < label_count; l++) {
-            if (strcmp(labels[l].name, var_name) == 0) {
-                target_offset = labels[l].offset;
-                break;
-            }
-        }
-
-        int total_size = 7; // REX.W (1) + OP (1) + ModRM (1) + Disp32 (4)
         if (bin_buffer) {
-            if (target_offset == -1) {
-                nano_print("  [Eroare ASM] Eticheta nu a fost gasita pentru lea: ");
-                nano_print(var_name);
-                nano_print("\n");
-                target_offset = *bin_idx + total_size;
+            if (g_generate_elf) {
+                // 1. push rax (salvăm valoarea pe stivă ca tampon de 1 octet)
+                bin_buffer[(*bin_idx)++] = 0x50;
+                // 2. mov rax, 1 (sys_write)
+                bin_buffer[(*bin_idx)++] = 0x48; bin_buffer[(*bin_idx)++] = 0xC7; bin_buffer[(*bin_idx)++] = 0xC0;
+                bin_buffer[(*bin_idx)++] = 0x01; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00;
+                // 3. mov rdi, 1 (stdout)
+                bin_buffer[(*bin_idx)++] = 0x48; bin_buffer[(*bin_idx)++] = 0xC7; bin_buffer[(*bin_idx)++] = 0xC7;
+                bin_buffer[(*bin_idx)++] = 0x01; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00;
+                // 4. mov rsi, rsp (adresa caracterului de pe stivă)
+                bin_buffer[(*bin_idx)++] = 0x48; bin_buffer[(*bin_idx)++] = 0x89; bin_buffer[(*bin_idx)++] = 0xE6;
+                // 5. mov rdx, 1 (lungime 1 octet)
+                bin_buffer[(*bin_idx)++] = 0x48; bin_buffer[(*bin_idx)++] = 0xC7; bin_buffer[(*bin_idx)++] = 0xC2;
+                bin_buffer[(*bin_idx)++] = 0x01; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00;
+                // 6. syscall
+                bin_buffer[(*bin_idx)++] = 0x0F; bin_buffer[(*bin_idx)++] = 0x05;
+                // 7. pop rax (curățăm stiva)
+                bin_buffer[(*bin_idx)++] = 0x58;
+            } else {
+                bin_buffer[(*bin_idx)++] = 0x50;
+                bin_buffer[(*bin_idx)++] = 0x48; bin_buffer[(*bin_idx)++] = 0xC7; bin_buffer[(*bin_idx)++] = 0xC0;
+                bin_buffer[(*bin_idx)++] = 0x1B; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00; bin_buffer[(*bin_idx)++] = 0x00;
+                bin_buffer[(*bin_idx)++] = 0xCD; bin_buffer[(*bin_idx)++] = 0x80;
+                bin_buffer[(*bin_idx)++] = 0x58;
             }
-
-            // Opcode pentru: lea rax, [rip + disp32]
-            bin_buffer[(*bin_idx)++] = 0x48;
-            bin_buffer[(*bin_idx)++] = 0x8D;
-            bin_buffer[(*bin_idx)++] = 0x05;
-
-            int rel_pos = *bin_idx;
-            *bin_idx += 4;
-
-            int32_t rel32 = target_offset - (rel_pos + 4);
-
-            bin_buffer[rel_pos + 0] = (uint8_t)(rel32 & 0xFF);
-            bin_buffer[rel_pos + 1] = (uint8_t)((rel32 >> 8) & 0xFF);
-            bin_buffer[rel_pos + 2] = (uint8_t)((rel32 >> 16) & 0xFF);
-            bin_buffer[rel_pos + 3] = (uint8_t)((rel32 >> 24) & 0xFF);
-
-            nano_print("  [ASM] lea rax, [var] -> opcod generat\n");
+            nano_print("   [ASM] print_char -> opcod generat\n");
         }
         return total_size;
     }
+	
+	// --- LEA (Load Effective Address - pentru operatorul &) ---
+    if (strcmp(inst->mnemonic, "lea") == 0) {
+        int dest_reg = -1;
+        if (strcmp(inst->op1, "rax") == 0) dest_reg = 0;
+        else if (strcmp(inst->op1, "rcx") == 0) dest_reg = 1;
+        else if (strcmp(inst->op1, "rdx") == 0) dest_reg = 2;
+        else if (strcmp(inst->op1, "rbx") == 0) dest_reg = 3;
+        else if (strcmp(inst->op1, "rsi") == 0) dest_reg = 6;
+        else if (strcmp(inst->op1, "rdi") == 0) dest_reg = 7;
+
+        if (dest_reg != -1) {
+            char var_name[64];
+            int i = 0, j = 0;
+            // Extragem numele variabilei din paranteze: [var_x]
+            while (inst->op2[i] != '\0') {
+                if (inst->op2[i] != '[' && inst->op2[i] != ']') {
+                    var_name[j++] = inst->op2[i];
+                }
+                i++;
+            }
+            var_name[j] = '\0';
+
+            int target_offset = -1;
+            for (int l = 0; l < label_count; l++) {
+                if (strcmp(labels[l].name, var_name) == 0) {
+                    target_offset = labels[l].offset;
+                    break;
+                }
+            }
+
+            int total_size = 7; // REX.W (1) + OP (1) + ModRM (1) + Disp32 (4)
+            if (bin_buffer) {
+                if (target_offset == -1) {
+                    nano_print("  [Eroare ASM] Eticheta nu a fost gasita pentru lea: ");
+                    nano_print(var_name);
+                    nano_print("\n");
+                    target_offset = *bin_idx + total_size;
+                }
+
+                // Opcode pentru: lea reg, [rip + disp32]
+                bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                bin_buffer[(*bin_idx)++] = 0x8D; // LEA opcode
+                bin_buffer[(*bin_idx)++] = (uint8_t)((dest_reg << 3) | 0x05); // ModRM RIP-relative
+
+                int rel_pos = *bin_idx;
+                *bin_idx += 4;
+
+                int32_t rel32 = target_offset - (rel_pos + 4);
+
+                bin_buffer[rel_pos + 0] = (uint8_t)(rel32 & 0xFF);
+                bin_buffer[rel_pos + 1] = (uint8_t)((rel32 >> 8) & 0xFF);
+                bin_buffer[rel_pos + 2] = (uint8_t)((rel32 >> 16) & 0xFF);
+                bin_buffer[rel_pos + 3] = (uint8_t)((rel32 >> 24) & 0xFF);
+
+                nano_print("  [ASM] lea reg, [var] -> opcod generat\n");
+            }
+            return total_size;
+        }
+    }
+    // --- PUSH & POP ---
     // --- PUSH & POP ---
     if (strcmp(inst->mnemonic, "push") == 0) {
         uint8_t opcode = 0x50; // default rax
-        if (strcmp(inst->op1, "rdi") == 0) opcode = 0x57;
-        else if (strcmp(inst->op1, "rsi") == 0) opcode = 0x56;
+        if (strcmp(inst->op1, "rcx") == 0) opcode = 0x51;
         else if (strcmp(inst->op1, "rdx") == 0) opcode = 0x52;
+        else if (strcmp(inst->op1, "rbx") == 0) opcode = 0x53;
+        else if (strcmp(inst->op1, "rsp") == 0) opcode = 0x54;
+        else if (strcmp(inst->op1, "rbp") == 0) opcode = 0x55;
+        else if (strcmp(inst->op1, "rsi") == 0) opcode = 0x56;
+        else if (strcmp(inst->op1, "rdi") == 0) opcode = 0x57;
 
         if (bin_buffer) {
             bin_buffer[(*bin_idx)++] = opcode;
-            nano_print("  [ASM] push reg -> opcod generat\n");
+            nano_print("   [ASM] push reg -> opcod generat\n");
         }
         return 1;
     }
 
     if (strcmp(inst->mnemonic, "pop") == 0) {
         uint8_t opcode = 0x58; // default rax
-        if (strcmp(inst->op1, "rdi") == 0) opcode = 0x5F;
-        else if (strcmp(inst->op1, "rsi") == 0) opcode = 0x5E;
+        if (strcmp(inst->op1, "rcx") == 0) opcode = 0x59;
         else if (strcmp(inst->op1, "rdx") == 0) opcode = 0x5A;
+        else if (strcmp(inst->op1, "rbx") == 0) opcode = 0x5B;
+        else if (strcmp(inst->op1, "rsp") == 0) opcode = 0x5C;
+        else if (strcmp(inst->op1, "rbp") == 0) opcode = 0x5D;
+        else if (strcmp(inst->op1, "rsi") == 0) opcode = 0x5E;
+        else if (strcmp(inst->op1, "rdi") == 0) opcode = 0x5F;
 
         if (bin_buffer) {
             bin_buffer[(*bin_idx)++] = opcode;
-            nano_print("  [ASM] pop reg -> opcod generat\n");
+            nano_print("   [ASM] pop reg -> opcod generat\n");
         }
         return 1;
     }
@@ -402,194 +471,160 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
     }
 
     // --- MOV ---
+    // --- MOV ---
+    // --- MOV ---
     if (strcmp(inst->mnemonic, "mov") == 0) {
-        int src_reg_id = -1;
-        if (strcmp(inst->op2, "rax") == 0) src_reg_id = 0;
-        else if (strcmp(inst->op2, "rcx") == 0) src_reg_id = 1;
-        else if (strcmp(inst->op2, "rdx") == 0) src_reg_id = 2;
-        else if (strcmp(inst->op2, "rbx") == 0) src_reg_id = 3;
-        else if (strcmp(inst->op2, "rsi") == 0) src_reg_id = 6;
-        else if (strcmp(inst->op2, "rdi") == 0) src_reg_id = 7;
-
-        int dst_reg_id = -1;
-        if (strcmp(inst->op1, "rax") == 0) dst_reg_id = 0;
-        else if (strcmp(inst->op1, "rcx") == 0) dst_reg_id = 1;
-        else if (strcmp(inst->op1, "rdx") == 0) dst_reg_id = 2;
-        else if (strcmp(inst->op1, "rbx") == 0) dst_reg_id = 3;
-        else if (strcmp(inst->op1, "rsi") == 0) dst_reg_id = 6;
-        else if (strcmp(inst->op1, "rdi") == 0) dst_reg_id = 7;
-
-        if (dst_reg_id != -1 && src_reg_id != -1) {
-            if (bin_buffer) {
-                bin_buffer[(*bin_idx)++] = 0x48;
-                bin_buffer[(*bin_idx)++] = 0x89;
-                bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 | (src_reg_id << 3) | dst_reg_id);
-                nano_print("  [ASM] mov reg, reg -> opcod generat\n");
-            }
-            return 3;
-        }
-
-        if (strcmp(inst->op1, "rax") == 0 || strcmp(inst->op1, "rdi") == 0 || 
-            strcmp(inst->op1, "rsi") == 0 || strcmp(inst->op1, "rdx") == 0 ||
-            strcmp(inst->op1, "rbx") == 0) {
-            
-            if (inst->op2[0] != '[') {
-                int val = atoi(inst->op2);
-                uint8_t reg_code = 0xC0; // rax
-                if (strcmp(inst->op1, "rdi") == 0) reg_code = 0xC7;
-                else if (strcmp(inst->op1, "rsi") == 0) reg_code = 0xC6;
-                else if (strcmp(inst->op1, "rdx") == 0) reg_code = 0xC2;
-                else if (strcmp(inst->op1, "rbx") == 0) reg_code = 0xC3;
-
-                if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0x48;
-                    bin_buffer[(*bin_idx)++] = 0xC7;
-                    bin_buffer[(*bin_idx)++] = reg_code;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)(val & 0xFF);
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((val >> 8) & 0xFF);
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((val >> 16) & 0xFF);
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((val >> 24) & 0xFF);
-                    nano_print("  [ASM] mov reg, val -> opcod generat\n");
-                }
-                return 7;
-            }
-        }
-
-        if (inst->op2[0] == '[') {
-            char inner[32];
-            int m_i = 0, m_j = 0;
-            while (inst->op2[m_i] != '\0') {
-                if (inst->op2[m_i] != '[' && inst->op2[m_i] != ']') {
-                    inner[m_j++] = inst->op2[m_i];
-                }
-                m_i++;
-            }
-            inner[m_j] = '\0';
-
-            int src_reg = -1;
-            if (strcmp(inner, "rax") == 0) src_reg = 0;
-            else if (strcmp(inner, "rbx") == 0) src_reg = 3;
-            else if (strcmp(inner, "rdi") == 0) src_reg = 7;
-            else if (strcmp(inner, "rsi") == 0) src_reg = 6;
-            else if (strcmp(inner, "rdx") == 0) src_reg = 2;
-
-            if (src_reg != -1) {
-                int dest_reg = -1;
-                if (strcmp(inst->op1, "rax") == 0) dest_reg = 0;
-                else if (strcmp(inst->op1, "rbx") == 0) dest_reg = 3;
-                else if (strcmp(inst->op1, "rdi") == 0) dest_reg = 7;
-                else if (strcmp(inst->op1, "rsi") == 0) dest_reg = 6;
-                else if (strcmp(inst->op1, "rdx") == 0) dest_reg = 2;
-
-                if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0x48;
-                    bin_buffer[(*bin_idx)++] = 0x8B;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((dest_reg << 3) | src_reg);
-                    nano_print("  [ASM] mov reg, [reg] -> opcod generat\n");
-                }
-                return 3;
-            } else {
-                int target_offset = -1;
-                for (int l = 0; l < label_count; l++) {
-                    if (strcmp(labels[l].name, inner) == 0) {
-                        target_offset = labels[l].offset;
-                        break;
-                    }
-                }
-
-                int reg_code = 0;
-                if (strcmp(inst->op1, "rax") == 0) reg_code = 0;
-                else if (strcmp(inst->op1, "rbx") == 0) reg_code = 3;
-                else if (strcmp(inst->op1, "rdi") == 0) reg_code = 7;
-                else if (strcmp(inst->op1, "rsi") == 0) reg_code = 6;
-                else if (strcmp(inst->op1, "rdx") == 0) reg_code = 2;
-
-                if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0x48;
-                    bin_buffer[(*bin_idx)++] = 0x8B;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((reg_code << 3) | 0x05);
-
-                    int disp_pos = *bin_idx;
-                    *bin_idx += 4;
-                    int32_t disp32 = target_offset - (disp_pos + 4);
-
-                    bin_buffer[disp_pos + 0] = (uint8_t)(disp32 & 0xFF);
-                    bin_buffer[disp_pos + 1] = (uint8_t)((disp32 >> 8) & 0xFF);
-                    bin_buffer[disp_pos + 2] = (uint8_t)((disp32 >> 16) & 0xFF);
-                    bin_buffer[disp_pos + 3] = (uint8_t)((disp32 >> 24) & 0xFF);
-
-                    nano_print("  [ASM] mov reg, [var] (RIP-relative) -> opcod generat\n");
-                }
-                return 7;
-            }
-        }
-
+        
+        // Cazul 1: mov [dest], src
         if (inst->op1[0] == '[') {
-            char inner[32];
+            char mem_name[32];
             int m_i = 0, m_j = 0;
             while (inst->op1[m_i] != '\0') {
                 if (inst->op1[m_i] != '[' && inst->op1[m_i] != ']') {
-                    inner[m_j++] = inst->op1[m_i];
+                    mem_name[m_j++] = inst->op1[m_i];
                 }
                 m_i++;
             }
-            inner[m_j] = '\0';
+            mem_name[m_j] = '\0';
 
-            int dest_reg = -1;
-            if (strcmp(inner, "rax") == 0) dest_reg = 0;
-            else if (strcmp(inner, "rbx") == 0) dest_reg = 3;
-            else if (strcmp(inner, "rdi") == 0) dest_reg = 7;
-            else if (strcmp(inner, "rsi") == 0) dest_reg = 6;
-            else if (strcmp(inner, "rdx") == 0) dest_reg = 2;
+            int dest_reg = get_reg_code(mem_name); // ex: rbx din [rbx]
+            int src_reg  = get_reg_code(inst->op2); // ex: rax din rax
 
-            if (dest_reg != -1) {
-                int src_reg = -1;
-                if (strcmp(inst->op2, "rax") == 0) src_reg = 0;
-                else if (strcmp(inst->op2, "rbx") == 0) src_reg = 3;
-                else if (strcmp(inst->op2, "rdi") == 0) src_reg = 7;
-                else if (strcmp(inst->op2, "rsi") == 0) src_reg = 6;
-                else if (strcmp(inst->op2, "rdx") == 0) src_reg = 2;
-
+            // 1a. mov [reg], reg (ex: mov [rbx], rax) -> 3 octeți
+            if (dest_reg != -1 && src_reg != -1) {
                 if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0x48;
-                    bin_buffer[(*bin_idx)++] = 0x89;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((src_reg << 3) | dest_reg);
-                    nano_print("  [ASM] mov [reg], reg -> opcod generat\n");
+                    bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                    bin_buffer[(*bin_idx)++] = 0x89; // MOV [reg], reg
+                    bin_buffer[(*bin_idx)++] = (uint8_t)((src_reg << 3) | dest_reg); // ModRM
+                    nano_print("   [ASM] mov [reg], reg -> opcod generat\n");
                 }
                 return 3;
-            } else {
+            }
+            // 1b. mov [var], reg (ex: mov [var_x], rax) -> 7 octeți
+            else if (src_reg != -1 && dest_reg == -1) {
                 int target_offset = -1;
                 for (int l = 0; l < label_count; l++) {
-                    if (strcmp(labels[l].name, inner) == 0) {
+                    if (strcmp(labels[l].name, mem_name) == 0) {
                         target_offset = labels[l].offset;
                         break;
                     }
                 }
-
-                int src_reg = 0;
-                if (strcmp(inst->op2, "rax") == 0) src_reg = 0;
-                else if (strcmp(inst->op2, "rbx") == 0) src_reg = 3;
-                else if (strcmp(inst->op2, "rdi") == 0) src_reg = 7;
-                else if (strcmp(inst->op2, "rsi") == 0) src_reg = 6;
-                else if (strcmp(inst->op2, "rdx") == 0) src_reg = 2;
-
+                
                 if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0x48;
-                    bin_buffer[(*bin_idx)++] = 0x89;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((src_reg << 3) | 0x05);
+                    if (target_offset == -1) {
+                        nano_print("  [Eroare ASM] Eticheta nu a fost gasita: ");
+                        nano_print(mem_name);
+                        nano_print("\n");
+                    }
+                    bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                    bin_buffer[(*bin_idx)++] = 0x89; // MOV [var], reg
+                    bin_buffer[(*bin_idx)++] = (uint8_t)((src_reg << 3) | 0x05); // ModRM RIP-relative
 
-                    int disp_pos = *bin_idx;
+                    int rel_pos = *bin_idx;
                     *bin_idx += 4;
-                    int32_t disp32 = target_offset - (disp_pos + 4);
+                    int32_t rel32 = target_offset - (rel_pos + 4);
 
-                    bin_buffer[disp_pos + 0] = (uint8_t)(disp32 & 0xFF);
-                    bin_buffer[disp_pos + 1] = (uint8_t)((disp32 >> 8) & 0xFF);
-                    bin_buffer[disp_pos + 2] = (uint8_t)((disp32 >> 16) & 0xFF);
-                    bin_buffer[disp_pos + 3] = (uint8_t)((disp32 >> 24) & 0xFF);
-
-                    nano_print("  [ASM] mov [var], reg (RIP-relative) -> opcod generat\n");
+                    bin_buffer[rel_pos + 0] = (uint8_t)(rel32 & 0xFF);
+                    bin_buffer[rel_pos + 1] = (uint8_t)((rel32 >> 8) & 0xFF);
+                    bin_buffer[rel_pos + 2] = (uint8_t)((rel32 >> 16) & 0xFF);
+                    bin_buffer[rel_pos + 3] = (uint8_t)((rel32 >> 24) & 0xFF);
+                    nano_print("   [ASM] mov [var], reg -> opcod generat\n");
                 }
                 return 7;
+            }
+        }
+        
+        // Cazul 2: mov dest, src
+        else {
+            int dest_reg = get_reg_code(inst->op1);
+            if (dest_reg != -1) {
+                
+                // 2a. mov reg, [src]
+                if (inst->op2[0] == '[') {
+                    char mem_name[32];
+                    int m_i = 0, m_j = 0;
+                    while (inst->op2[m_i] != '\0') {
+                        if (inst->op2[m_i] != '[' && inst->op2[m_i] != ']') {
+                            mem_name[m_j++] = inst->op2[m_i];
+                        }
+                        m_i++;
+                    }
+                    mem_name[m_j] = '\0';
+
+                    int src_reg = get_reg_code(mem_name); // ex: rbx din [rbx]
+
+                    // 2a.1. mov reg, [reg] (ex: mov rax, [rbx]) -> 3 octeți
+                    if (src_reg != -1) {
+                        if (bin_buffer) {
+                            bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                            bin_buffer[(*bin_idx)++] = 0x8B; // MOV reg, [reg]
+                            bin_buffer[(*bin_idx)++] = (uint8_t)((dest_reg << 3) | src_reg); // ModRM
+                            nano_print("   [ASM] mov reg, [reg] -> opcod generat\n");
+                        }
+                        return 3;
+                    }
+                    // 2a.2. mov reg, [var] (ex: mov rax, [var_x]) -> 7 octeți
+                    else {
+                        int target_offset = -1;
+                        for (int l = 0; l < label_count; l++) {
+                            if (strcmp(labels[l].name, mem_name) == 0) {
+                                target_offset = labels[l].offset;
+                                break;
+                            }
+                        }
+                        
+                        if (bin_buffer) {
+                            if (target_offset == -1) {
+                                nano_print("  [Eroare ASM] Eticheta nu a fost gasita: ");
+                                nano_print(mem_name);
+                                nano_print("\n");
+                            }
+                            bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                            bin_buffer[(*bin_idx)++] = 0x8B; // MOV reg, [var]
+                            bin_buffer[(*bin_idx)++] = (uint8_t)((dest_reg << 3) | 0x05); // ModRM RIP-relative
+
+                            int rel_pos = *bin_idx;
+                            *bin_idx += 4;
+                            int32_t rel32 = target_offset - (rel_pos + 4);
+
+                            bin_buffer[rel_pos + 0] = (uint8_t)(rel32 & 0xFF);
+                            bin_buffer[rel_pos + 1] = (uint8_t)((rel32 >> 8) & 0xFF);
+                            bin_buffer[rel_pos + 2] = (uint8_t)((rel32 >> 16) & 0xFF);
+                            bin_buffer[rel_pos + 3] = (uint8_t)((rel32 >> 24) & 0xFF);
+                            nano_print("   [ASM] mov reg, [var] -> opcod generat\n");
+                        }
+                        return 7;
+                    }
+                }
+                
+                // 2b. mov reg, reg (ex: mov rax, rbx) -> 3 octeți
+                else if (get_reg_code(inst->op2) != -1) {
+                    int src_reg = get_reg_code(inst->op2);
+                    if (bin_buffer) {
+                        bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                        bin_buffer[(*bin_idx)++] = 0x89; // MOV reg, reg
+                        bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 | (src_reg << 3) | dest_reg); // ModRM (register-to-register)
+                        nano_print("   [ASM] mov reg, reg -> opcod generat\n");
+                    }
+                    return 3;
+                }
+                
+                // 2c. mov reg, imm (ex: mov rax, 10) -> 7 octeți
+                else {
+                    int32_t imm = atoi(inst->op2);
+                    if (bin_buffer) {
+                        bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                        bin_buffer[(*bin_idx)++] = 0xC7; // MOV reg, imm32
+                        bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 | dest_reg); // ModRM
+
+                        bin_buffer[(*bin_idx)++] = (uint8_t)(imm & 0xFF);
+                        bin_buffer[(*bin_idx)++] = (uint8_t)((imm >> 8) & 0xFF);
+                        bin_buffer[(*bin_idx)++] = (uint8_t)((imm >> 16) & 0xFF);
+                        bin_buffer[(*bin_idx)++] = (uint8_t)((imm >> 24) & 0xFF);
+                        nano_print("   [ASM] mov reg, imm -> opcod generat\n");
+                    }
+                    return 7;
+                }
             }
         }
     }
@@ -795,6 +830,7 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
     }
 
     // --- MOVSS (Float Load / Store / Move) ---
+	/*
     if (strcmp(inst->mnemonic, "movss") == 0) {
         if (inst->op1[0] == 'x' && inst->op1[1] == 'm' && inst->op1[2] == 'm' &&
             inst->op2[0] == 'x' && inst->op2[1] == 'm' && inst->op2[2] == 'm') {
@@ -912,7 +948,142 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
             }
         }
     }
+	*/
+	
+	// --- MOVSS (Float Load / Store / Move) ---
+    // --- MOVSS ---
+    // --- MOVSS ---
+    if (strcmp(inst->mnemonic, "movss") == 0) {
+        
+        // Cazul 1: movss xmm, xmm
+        if (inst->op1[0] == 'x' && inst->op1[1] == 'm' && inst->op1[2] == 'm' &&
+            inst->op2[0] == 'x' && inst->op2[1] == 'm' && inst->op2[2] == 'm') {
+            int xmm_dest = inst->op1[3] - '0';
+            int xmm_src  = inst->op2[3] - '0';
 
+            if (xmm_dest >= 0 && xmm_dest <= 7 && xmm_src >= 0 && xmm_src <= 7) {
+                if (bin_buffer) {
+                    bin_buffer[(*bin_idx)++] = 0xF3;
+                    bin_buffer[(*bin_idx)++] = 0x0F;
+                    bin_buffer[(*bin_idx)++] = 0x10;
+                    bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 | (xmm_dest << 3) | xmm_src);
+                    nano_print("   [ASM] movss xmm, xmm -> opcod generat\n");
+                }
+                return 4;
+            }
+        }
+
+        // Cazul 2: movss xmm, [mem]
+        if (inst->op1[0] == 'x' && inst->op1[1] == 'm' && inst->op1[2] == 'm' && inst->op2[0] == '[') {
+            int xmm_dest = inst->op1[3] - '0';
+            if (xmm_dest >= 0 && xmm_dest <= 7) {
+                char mem_name[32];
+                int m_i = 0, m_j = 0;
+                while (inst->op2[m_i] != '\0') {
+                    if (inst->op2[m_i] != '[' && inst->op2[m_i] != ']') {
+                        mem_name[m_j++] = inst->op2[m_i];
+                    }
+                    m_i++;
+                }
+                mem_name[m_j] = '\0';
+
+                int src_reg = get_reg_code(mem_name); // ex: rbx
+
+                // 2a. movss xmm, [reg] (ex: movss xmm0, [rbx])
+                if (src_reg != -1) {
+                    if (bin_buffer) {
+                        bin_buffer[(*bin_idx)++] = 0xF3;
+                        bin_buffer[(*bin_idx)++] = 0x0F;
+                        bin_buffer[(*bin_idx)++] = 0x10;
+                        bin_buffer[(*bin_idx)++] = (uint8_t)((xmm_dest << 3) | src_reg);
+                        nano_print("   [ASM] movss xmm, [reg] -> opcod generat\n");
+                    }
+                    return 4;
+                }
+                // 2b. movss xmm, [var]
+                else {
+                    int target_offset = -1;
+                    for (int l = 0; l < label_count; l++) {
+                        if (strcmp(labels[l].name, mem_name) == 0) { 
+                            target_offset = labels[l].offset; 
+                            break; 
+                        }
+                    }
+                    if (bin_buffer) {
+                        bin_buffer[(*bin_idx)++] = 0xF3;
+                        bin_buffer[(*bin_idx)++] = 0x0F;
+                        bin_buffer[(*bin_idx)++] = 0x10;
+                        bin_buffer[(*bin_idx)++] = (uint8_t)((xmm_dest << 3) | 0x05);
+                        int disp_pos = *bin_idx;
+                        *bin_idx += 4;
+                        int32_t disp32 = target_offset - (disp_pos + 4);
+                        bin_buffer[disp_pos + 0] = (uint8_t)(disp32 & 0xFF);
+                        bin_buffer[disp_pos + 1] = (uint8_t)((disp32 >> 8) & 0xFF);
+                        bin_buffer[disp_pos + 2] = (uint8_t)((disp32 >> 16) & 0xFF);
+                        bin_buffer[disp_pos + 3] = (uint8_t)((disp32 >> 24) & 0xFF);
+                        nano_print("   [ASM] movss xmm, [var] -> opcod generat\n");
+                    }
+                    return 8;
+                }
+            }
+        }
+
+        // Cazul 3: movss [mem], xmm
+        if (inst->op1[0] == '[' && inst->op2[0] == 'x' && inst->op2[1] == 'm' && inst->op2[2] == 'm') {
+            int xmm_src = inst->op2[3] - '0';
+            if (xmm_src >= 0 && xmm_src <= 7) {
+                char mem_name[32];
+                int m_i = 0, m_j = 0;
+                while (inst->op1[m_i] != '\0') {
+                    if (inst->op1[m_i] != '[' && inst->op1[m_i] != ']') {
+                        mem_name[m_j++] = inst->op1[m_i];
+                    }
+                    m_i++;
+                }
+                mem_name[m_j] = '\0';
+
+                int dest_reg = get_reg_code(mem_name); // ex: rbx
+
+                // 3a. movss [reg], xmm (ex: movss [rbx], xmm0)
+                if (dest_reg != -1) {
+                    if (bin_buffer) {
+                        bin_buffer[(*bin_idx)++] = 0xF3;
+                        bin_buffer[(*bin_idx)++] = 0x0F;
+                        bin_buffer[(*bin_idx)++] = 0x11;
+                        bin_buffer[(*bin_idx)++] = (uint8_t)((xmm_src << 3) | dest_reg);
+                        nano_print("   [ASM] movss [reg], xmm -> opcod generat\n");
+                    }
+                    return 4;
+                }
+                // 3b. movss [var], xmm
+                else {
+                    int target_offset = -1;
+                    for (int l = 0; l < label_count; l++) {
+                        if (strcmp(labels[l].name, mem_name) == 0) { 
+                            target_offset = labels[l].offset; 
+                            break; 
+                        }
+                    }
+                    if (bin_buffer) {
+                        bin_buffer[(*bin_idx)++] = 0xF3;
+                        bin_buffer[(*bin_idx)++] = 0x0F;
+                        bin_buffer[(*bin_idx)++] = 0x11;
+                        bin_buffer[(*bin_idx)++] = (uint8_t)((xmm_src << 3) | 0x05);
+                        int disp_pos = *bin_idx;
+                        *bin_idx += 4;
+                        int32_t disp32 = target_offset - (disp_pos + 4);
+                        bin_buffer[disp_pos + 0] = (uint8_t)(disp32 & 0xFF);
+                        bin_buffer[disp_pos + 1] = (uint8_t)((disp32 >> 8) & 0xFF);
+                        bin_buffer[disp_pos + 2] = (uint8_t)((disp32 >> 16) & 0xFF);
+                        bin_buffer[disp_pos + 3] = (uint8_t)((disp32 >> 24) & 0xFF);
+                        nano_print("   [ASM] movss [var], xmm -> opcod generat\n");
+                    }
+                    return 8;
+                }
+            }
+        }
+    }
+	
     // --- PRINT_XMM ---
     // --- PRINT_XMM (Cu suport pentru zecimale ftoa) ---
     // --- PRINT_XMM (Cu suport complet ftoa - 2 zecimale) ---
@@ -1233,7 +1404,7 @@ int main(int argc, char* argv[]) {
     }
     src_buffer[bytes_read] = '\0';
 
-    Label labels[32];
+    Label labels[MAX_LABELS];
     int label_count = 0;
 
     int start_offset = generate_elf ? 120 : 8;
