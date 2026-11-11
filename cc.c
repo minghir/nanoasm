@@ -32,6 +32,17 @@ int asm_idx = 0;
 Variable var_table[128];
 int var_count = 0;
 
+
+
+
+typedef struct {
+    char name[32];
+    char value[256];
+} StringLiteral;
+
+StringLiteral string_table[128];
+int string_count = 0;
+
 void append_str(char* dest, int* idx, const char* src);
 void append_int(char* dest, int* idx, int val);
 Token get_next_token();
@@ -106,6 +117,16 @@ int is_var_char(const char* name) {
     }
     return 0;
 }
+
+int is_var_str_ptr(const char* name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(var_table[i].name, name) == 0) {
+            return var_table[i].is_char && var_table[i].is_pointer && (var_table[i].pointer_level == 1);
+        }
+    }
+    return 0;
+}
+
 
 int is_deref_float(const char* name) {
     for (int i = 0; i < var_count; i++) {
@@ -251,7 +272,23 @@ void parse_float_expr() {
 
 void parse_factor() {
     Token t = get_next_token();
-    if (t.type == TOKEN_NUMBER || t.type == TOKEN_CHAR_LITERAL) {
+	if (t.type == TOKEN_STRING) {
+        // 1. Creăm un nume unic pentru eticheta string-ului (ex: str_lit_0)
+        char str_name[32];
+        strcpy(str_name, "str_lit_");
+        itoa(string_count, str_name + 8, 10);
+        
+        // 2. Îl salvăm în tabel
+        strcpy(string_table[string_count].name, str_name);
+        strcpy(string_table[string_count].value, t.text);
+        string_count++;
+        
+        // 3. Generăm assembly pentru a pune adresa lui în RAX
+        append_str(asm_out, &asm_idx, "    lea rax, [");
+        append_str(asm_out, &asm_idx, str_name);
+        append_str(asm_out, &asm_idx, "]\n");
+    }
+    else if (t.type == TOKEN_NUMBER || t.type == TOKEN_CHAR_LITERAL) {
         append_str(asm_out, &asm_idx, "    mov rax, ");
         append_str(asm_out, &asm_idx, t.text);
         append_str(asm_out, &asm_idx, "\n");
@@ -791,46 +828,40 @@ void parse_statement_token(Token t) {
         else {
             int is_float_expression = 0;
             int is_char_expression = 0;
+            int is_str_ptr_expression = 0; // Detecție pointer char*
 
             if (arg_tok.type == TOKEN_CHAR_LITERAL) {
                 is_char_expression = 1;
+            } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_str_ptr(arg_tok.text)) {
+                is_str_ptr_expression = 1; // Este variabilă char*
             } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_char(arg_tok.text)) {
                 is_char_expression = 1;
             } else if (arg_tok.type == TOKEN_FLOAT_NUMBER) {
                 is_float_expression = 1;
             } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_float(arg_tok.text)) {
                 is_float_expression = 1;
-            } else if (arg_tok.type == TOKEN_STAR) {
-                int star_count = 1;
-                Token next = get_next_token();
-                while (next.type == TOKEN_STAR) {
-                    star_count++;
-                    next = get_next_token();
-                }
-                Token var_tok = next;
-                if (is_var_base_float(var_tok.text) && (get_var_pointer_level(var_tok.text) == star_count)) {
-                    is_float_expression = 1;
-                }
-				else if (is_var_base_char(var_tok.text) && (get_var_pointer_level(var_tok.text) == star_count)) {
-                    is_char_expression = 1;
-                }
             }
 
             src_ptr = saved_ptr;
 
-            if (is_char_expression) {
-                parse_expr();       // Evaluează expresia (cod ASCII în RAX)
+            if (is_str_ptr_expression) {
+                parse_expr();       // Pune adresa pointer-ului din [var_s] în RAX
                 get_next_token();   // Consumă ')'
+                consume_semicolon();
+                append_str(asm_out, &asm_idx, "    print_str\n    newline\n");
+            } else if (is_char_expression) {
+                parse_expr();
+                get_next_token();
                 consume_semicolon();
                 append_str(asm_out, &asm_idx, "    print_char\n    newline\n");
             } else if (is_float_expression) {
                 parse_float_expr();
-                get_next_token();   // Consumă ')'
+                get_next_token();
                 consume_semicolon();
                 append_str(asm_out, &asm_idx, "    print_xmm\n    newline\n");
             } else {
-                parse_expr();       // Evaluează expresia de întregi
-                get_next_token();   // Consumă ')'
+                parse_expr();
+                get_next_token();
                 consume_semicolon();
                 append_str(asm_out, &asm_idx, "    print_rax\n    newline\n");
             }
@@ -1023,7 +1054,16 @@ int main(int argc, char** argv) {
                 append_str(asm_out, &asm_idx, "    data 0\n");
             }
         }
+		
     }
+	
+	for (int i = 0; i < string_count; i++) {
+			append_str(asm_out, &asm_idx, string_table[i].name);
+			append_str(asm_out, &asm_idx, ": data \"");
+			append_str(asm_out, &asm_idx, string_table[i].value);
+			// Adăugăm un `data 0` suplimentar pentru a asigura null-terminatorul (\0) specific limbajului C
+			append_str(asm_out, &asm_idx, "\"\n    data 0\n"); 
+		}
 
     asm_out[asm_idx] = '\0';
 

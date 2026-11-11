@@ -297,6 +297,55 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
         return total_size;
     }
 	
+	// --- PRINT_STR (Printează un string de la adresa aflată în RAX) ---
+    // --- PRINT_STR (Afișează un șir null-terminated de la adresa din RAX) ---
+    // --- PRINT_STR (Afișează un șir null-terminated de la adresa din RAX) ---
+    if (strcmp(inst->mnemonic, "print_str") == 0) {
+        static const uint8_t p_elf[] = {
+            0x50, 0x56, 0x57, 0x52, 0x51,                // push rax, rsi, rdi, rdx, rcx
+            0x48, 0x89, 0xC6,                            // mov rsi, rax
+            0x48, 0x31, 0xD2,                            // xor rdx, rdx (lungime = 0)
+            0x80, 0x3C, 0x16, 0x00,                      // cmp byte ptr [rsi+rdx], 0
+            0x74, 0x05,                                  // je +5 (salt la mov rax, 1)
+            0x48, 0xFF, 0xC2,                            // inc rdx
+            0xEB, 0xF5,                                  // jmp -11 (salt inapoi la cmp)
+            0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,    // mov rax, 1 (sys_write)
+            0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00,    // mov rdi, 1 (stdout)
+            0x0F, 0x05,                                  // syscall
+            0x59, 0x5A, 0x5F, 0x5E, 0x58                 // pop rcx, rdx, rdi, rsi, rax
+        };
+
+        static const uint8_t p_nas[] = {
+            0x50, 0x56, 0x57, 0x52, 0x51,                // push rax, rsi, rdi, rdx, rcx
+            0x48, 0x89, 0xC6,                            // mov rsi, rax
+            0x48, 0x31, 0xD2,                            // xor rdx, rdx (lungime = 0)
+            0x80, 0x3C, 0x16, 0x00,                      // cmp byte ptr [rsi+rdx], 0
+            0x74, 0x05,                                  // je +5
+            0x48, 0xFF, 0xC2,                            // inc rdx
+            0xEB, 0xF5,                                  // jmp -11
+            0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,    // mov rax, 1
+            0x48, 0x89, 0xF6,                            // mov rsi, rsi
+            0xCD, 0x80,                                  // int 0x80
+            0x59, 0x5A, 0x5F, 0x5E, 0x58                 // pop rcx, rdx, rdi, rsi, rax
+        };
+
+        int total_size = g_generate_elf ? sizeof(p_elf) : sizeof(p_nas);
+
+        if (bin_buffer) {
+            if (g_generate_elf) {
+                for (size_t b = 0; b < sizeof(p_elf); b++) {
+                    bin_buffer[(*bin_idx)++] = p_elf[b];
+                }
+            } else {
+                for (size_t b = 0; b < sizeof(p_nas); b++) {
+                    bin_buffer[(*bin_idx)++] = p_nas[b];
+                }
+            }
+            nano_print("  [ASM] print_str -> opcod generat\n");
+        }
+        return total_size;
+    }
+	
 	// --- LEA (Load Effective Address - pentru operatorul &) ---
     if (strcmp(inst->mnemonic, "lea") == 0) {
         int dest_reg = -1;
