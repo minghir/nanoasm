@@ -2,12 +2,12 @@
 
 typedef enum {
     TOKEN_EOF = 0, TOKEN_CHAR_KW, TOKEN_INT_KW, TOKEN_FLOAT_KW, TOKEN_PRINT_KW, TOKEN_IF_KW, TOKEN_ELSE_KW, TOKEN_WHILE_KW, TOKEN_FOR_KW, TOKEN_IDENTIFIER, 
-    TOKEN_NUMBER, TOKEN_FLOAT_NUMBER, TOKEN_STRING, TOKEN_CHAR_LITERAL, TOKEN_ASSIGN, 
+    TOKEN_NUMBER, TOKEN_FLOAT_NUMBER, TOKEN_STRING, TOKEN_CHAR_LITERAL, TOKEN_ASSIGN, TOKEN_RETURN_KW, 
     TOKEN_EQ, TOKEN_NE, TOKEN_GT, TOKEN_LT, TOKEN_GE, TOKEN_LE,
     TOKEN_SEMICOLON, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE,
 	TOKEN_LBRACKET, TOKEN_RBRACKET,
     TOKEN_AND, TOKEN_OR, TOKEN_NOT, TOKEN_AMPERSAND,
-    TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_MOD, TOKEN_UNKNOWN
+    TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_MOD, TOKEN_INC, TOKEN_DEC, TOKEN_UNKNOWN
 } TokenType;
 
 typedef struct {
@@ -24,6 +24,8 @@ typedef struct {
 	int is_array;     // 1 dacă este tablou
     int array_size;   // numărul de elemente
 } Variable;
+
+char current_function[64] = "";
 
 static const char* src_ptr = 0;
 char asm_out[4096];
@@ -55,6 +57,7 @@ void parse_expr();
 void parse_term();
 void parse_factor();
 void parse_statement();
+void consume_semicolon();
 
 void register_variable(const char* name, int is_float, int is_pointer, int pointer_level, int is_char) {
     for (int i = 0; i < var_count; i++) {
@@ -180,7 +183,24 @@ void parse_float_factor() {
         append_int(asm_out, &asm_idx, (int)u);
         append_str(asm_out, &asm_idx, "\n    mov [var_tmp_float], rax\n");
         append_str(asm_out, &asm_idx, "    movss xmm0, [var_tmp_float]\n");
-    } else if (t.type == TOKEN_IDENTIFIER) {
+    } 
+    else if (t.type == TOKEN_INC || t.type == TOKEN_DEC) {
+        // Dacă rândul începe cu ++ sau -- (ex: ++i;)
+        Token var_tok = get_next_token(); // Asta e variabila (ex: 'i')
+        consume_semicolon();
+        
+        append_str(asm_out, &asm_idx, "    mov rax, [var_");
+        append_str(asm_out, &asm_idx, var_tok.text);
+        append_str(asm_out, &asm_idx, "]\n");
+        
+        if (t.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
+        else append_str(asm_out, &asm_idx, "    dec rax\n");
+        
+        append_str(asm_out, &asm_idx, "    mov [var_");
+        append_str(asm_out, &asm_idx, var_tok.text);
+        append_str(asm_out, &asm_idx, "], rax\n");
+    }
+    else if (t.type == TOKEN_IDENTIFIER) {
         const char* saved_ptr = src_ptr;
         Token next = get_next_token();
         
@@ -300,13 +320,31 @@ void parse_factor() {
             parse_expr(); // Indexul i -> RAX
             get_next_token(); // Consumă ']'
             
-            append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
-            append_str(asm_out, &asm_idx, "    imul rbx\n");
-            append_str(asm_out, &asm_idx, "    lea rbx, [var_");
-            append_str(asm_out, &asm_idx, t.text);
-            append_str(asm_out, &asm_idx, "]\n");
-            append_str(asm_out, &asm_idx, "    add rax, rbx\n");
-            append_str(asm_out, &asm_idx, "    mov rax, [rax]\n"); // Citim valoarea
+            // Verificăm dacă este char* sau char[] (dimensiune element = 1 octet)
+            if (is_var_str_ptr(t.text) || is_var_base_char(t.text)) {
+                if (is_var_str_ptr(t.text)) {
+                    // Pentru char* s: încărcăm adresa stocată în pointer
+                    append_str(asm_out, &asm_idx, "    mov rbx, [var_");
+                    append_str(asm_out, &asm_idx, t.text);
+                    append_str(asm_out, &asm_idx, "]\n");
+                } else {
+                    // Pentru char arr[]: adresa de bază a tabloului
+                    append_str(asm_out, &asm_idx, "    lea rbx, [var_");
+                    append_str(asm_out, &asm_idx, t.text);
+                    append_str(asm_out, &asm_idx, "]\n");
+                }
+                append_str(asm_out, &asm_idx, "    add rbx, rax\n");
+                append_str(asm_out, &asm_idx, "    movzx rax, [rbx]\n"); // Citim 1 octet extins cu zero!
+            } else {
+                // Pentru int / float (dimensiune element = 8 octeți)
+                append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
+                append_str(asm_out, &asm_idx, "    imul rbx\n");
+                append_str(asm_out, &asm_idx, "    lea rbx, [var_");
+                append_str(asm_out, &asm_idx, t.text);
+                append_str(asm_out, &asm_idx, "]\n");
+                append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+                append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+            }
         } else {
             src_ptr = saved_ptr;
             append_str(asm_out, &asm_idx, "    mov rax, [var_");
@@ -577,6 +615,7 @@ Token get_next_token() {
         else if (str_eq(token.text, "else")) token.type = TOKEN_ELSE_KW;
         else if (str_eq(token.text, "while")) token.type = TOKEN_WHILE_KW;
         else if (str_eq(token.text, "for")) token.type = TOKEN_FOR_KW;
+        else if (str_eq(token.text, "return")) token.type = TOKEN_RETURN_KW;
         else token.type = TOKEN_IDENTIFIER;
         return token;
     }
@@ -627,8 +666,14 @@ Token get_next_token() {
         case ')': token.type = TOKEN_RPAREN; break;
         case '{': token.type = TOKEN_LBRACE; break;
         case '}': token.type = TOKEN_RBRACE; break;
-        case '+': token.type = TOKEN_PLUS; break;
-        case '-': token.type = TOKEN_MINUS; break;
+        case '+': 
+            if (*src_ptr == '+') { src_ptr++; token.type = TOKEN_INC; str_cpy(token.text, "++"); }
+            else { token.type = TOKEN_PLUS; }
+            break;
+        case '-': 
+            if (*src_ptr == '-') { src_ptr++; token.type = TOKEN_DEC; str_cpy(token.text, "--"); }
+            else { token.type = TOKEN_MINUS; }
+            break;
         case '&':
             if (*src_ptr == '&') { src_ptr++; token.type = TOKEN_AND; str_cpy(token.text, "&&"); }
             else { token.type = TOKEN_AMPERSAND; str_cpy(token.text, "&"); }
@@ -725,31 +770,52 @@ void parse_statement_token(Token t) {
         Token next_tok = get_next_token();
         
         if (next_tok.type == TOKEN_LBRACKET) {
-            // Atribuire în element de tablou: arr[i] = val;
-            parse_expr();     // Calculăm indexul i -> rezultatul în RAX
+            parse_expr();     // Calculăm indexul i -> RAX
             get_next_token(); // Consumă ']'
             
-            // Calculăm adresa adr = &arr + i * 8
-            append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
-            append_str(asm_out, &asm_idx, "    imul rbx\n");
-            append_str(asm_out, &asm_idx, "    lea rbx, [var_");
-            append_str(asm_out, &asm_idx, var_tok.text);
-            append_str(asm_out, &asm_idx, "]\n");
-            append_str(asm_out, &asm_idx, "    add rax, rbx\n");
-            append_str(asm_out, &asm_idx, "    push rax\n"); // Salvăm adresa &arr[i] pe stivă
-            
-            Token assign_tok = get_next_token(); // Consumă '='
-            if (assign_tok.type == TOKEN_ASSIGN) {
-                if (is_var_base_float(var_tok.text)) {
-                    parse_float_expr();
-                    consume_semicolon();
-                    append_str(asm_out, &asm_idx, "    pop rbx\n");
-                    append_str(asm_out, &asm_idx, "    movss [rbx], xmm0\n");
+            if (is_var_str_ptr(var_tok.text) || is_var_base_char(var_tok.text)) {
+                if (is_var_str_ptr(var_tok.text)) {
+                    append_str(asm_out, &asm_idx, "    mov rbx, [var_");
+                    append_str(asm_out, &asm_idx, var_tok.text);
+                    append_str(asm_out, &asm_idx, "]\n");
                 } else {
-                    parse_expr();
+                    append_str(asm_out, &asm_idx, "    lea rbx, [var_");
+                    append_str(asm_out, &asm_idx, var_tok.text);
+                    append_str(asm_out, &asm_idx, "]\n");
+                }
+                append_str(asm_out, &asm_idx, "    add rbx, rax\n");
+                append_str(asm_out, &asm_idx, "    push rbx\n"); // Salvăm adresa &s[i] pe stivă
+                
+                Token assign_tok = get_next_token(); // Consumă '='
+                if (assign_tok.type == TOKEN_ASSIGN) {
+                    parse_expr(); // Noua valoare -> RAX
                     consume_semicolon();
                     append_str(asm_out, &asm_idx, "    pop rbx\n");
-                    append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
+                    append_str(asm_out, &asm_idx, "    mov [rbx], al\n"); // Scriem doar 1 octet (AL)
+                }
+            } else {
+                // Atribuire standard pe 8 octeți
+                append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
+                append_str(asm_out, &asm_idx, "    imul rbx\n");
+                append_str(asm_out, &asm_idx, "    lea rbx, [var_");
+                append_str(asm_out, &asm_idx, var_tok.text);
+                append_str(asm_out, &asm_idx, "]\n");
+                append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+                append_str(asm_out, &asm_idx, "    push rax\n");
+                
+                Token assign_tok = get_next_token();
+                if (assign_tok.type == TOKEN_ASSIGN) {
+                    if (is_var_base_float(var_tok.text)) {
+                        parse_float_expr();
+                        consume_semicolon();
+                        append_str(asm_out, &asm_idx, "    pop rbx\n");
+                        append_str(asm_out, &asm_idx, "    movss [rbx], xmm0\n");
+                    } else {
+                        parse_expr();
+                        consume_semicolon();
+                        append_str(asm_out, &asm_idx, "    pop rbx\n");
+                        append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
+                    }
                 }
             }
         }
@@ -767,6 +833,20 @@ void parse_statement_token(Token t) {
                 append_str(asm_out, &asm_idx, var_tok.text);
                 append_str(asm_out, &asm_idx, "], rax\n");
             }
+        }
+        // SUPORT PENTRU INCREMENTARE / DECREMENTARE SINGULARĂ ---
+        else if (next_tok.type == TOKEN_INC || next_tok.type == TOKEN_DEC) {
+            consume_semicolon();
+            append_str(asm_out, &asm_idx, "    mov rax, [var_");
+            append_str(asm_out, &asm_idx, var_tok.text);
+            append_str(asm_out, &asm_idx, "]\n");
+            
+            if (next_tok.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
+            else append_str(asm_out, &asm_idx, "    dec rax\n");
+            
+            append_str(asm_out, &asm_idx, "    mov [var_");
+            append_str(asm_out, &asm_idx, var_tok.text);
+            append_str(asm_out, &asm_idx, "], rax\n");
         }
     }
     else if (t.type == TOKEN_STAR) {
@@ -830,27 +910,45 @@ void parse_statement_token(Token t) {
             int is_char_expression = 0;
             int is_str_ptr_expression = 0; // Detecție pointer char*
 
+            // NOU: Facem "peek" pentru a vedea dacă urmează '[' (adică indexare s[i])
+            const char* check_ptr = src_ptr;
+            Token peek_next = get_next_token();
+            src_ptr = check_ptr; // Restaurăm poziția cursorului
+
             if (arg_tok.type == TOKEN_CHAR_LITERAL) {
                 is_char_expression = 1;
-            } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_str_ptr(arg_tok.text)) {
-                is_str_ptr_expression = 1; // Este variabilă char*
-            } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_char(arg_tok.text)) {
+            } 
+            else if (arg_tok.type == TOKEN_IDENTIFIER && peek_next.type == TOKEN_LBRACKET) {
+                // Dacă avem variabilă urmată de '[', ne uităm la tipul de bază al ei
+                if (is_var_str_ptr(arg_tok.text) || is_var_base_char(arg_tok.text)) {
+                    is_char_expression = 1; // Elementul extras este un singur caracter!
+                } else if (is_var_base_float(arg_tok.text)) {
+                    is_float_expression = 1;
+                }
+            } 
+            else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_str_ptr(arg_tok.text)) {
+                is_str_ptr_expression = 1; // Este variabilă char* întreagă (ex: print(s))
+            } 
+            else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_char(arg_tok.text)) {
                 is_char_expression = 1;
-            } else if (arg_tok.type == TOKEN_FLOAT_NUMBER) {
+            } 
+            else if (arg_tok.type == TOKEN_FLOAT_NUMBER) {
                 is_float_expression = 1;
-            } else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_float(arg_tok.text)) {
+            } 
+            else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_float(arg_tok.text)) {
                 is_float_expression = 1;
             }
 
             src_ptr = saved_ptr;
 
+            // Generarea efectivă de cod în funcție de ce am detectat
             if (is_str_ptr_expression) {
-                parse_expr();       // Pune adresa pointer-ului din [var_s] în RAX
+                parse_expr();       // Evaluează expresia (adresa pointer-ului va fi în RAX)
                 get_next_token();   // Consumă ')'
                 consume_semicolon();
                 append_str(asm_out, &asm_idx, "    print_str\n    newline\n");
             } else if (is_char_expression) {
-                parse_expr();
+                parse_expr();       // Evaluează expresia (inclusiv indexarea) -> rezultatul (codul ASCII) e în RAX
                 get_next_token();
                 consume_semicolon();
                 append_str(asm_out, &asm_idx, "    print_char\n    newline\n");
@@ -980,6 +1078,7 @@ void parse_statement_token(Token t) {
         parse_statement_token(body_tok);
         
         const char* after_body_ptr = src_ptr; 
+/*        
         src_ptr = increment_ptr;              
 
         Token inc_var = get_next_token();
@@ -997,6 +1096,65 @@ void parse_statement_token(Token t) {
                 append_str(asm_out, &asm_idx, "], rax\n");
             }
         }
+        // SUPORT PENTRU i++ SAU i-- ÎN FOR ---
+        else if (inc_eq.type == TOKEN_INC || inc_eq.type == TOKEN_DEC) {
+             append_str(asm_out, &asm_idx, "    mov rax, [var_");
+             append_str(asm_out, &asm_idx, inc_var.text);
+             append_str(asm_out, &asm_idx, "]\n");
+             
+             if (inc_eq.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
+             else append_str(asm_out, &asm_idx, "    dec rax\n");
+             
+             append_str(asm_out, &asm_idx, "    mov [var_");
+             append_str(asm_out, &asm_idx, inc_var.text);
+             append_str(asm_out, &asm_idx, "], rax\n");
+        }
+*/
+        src_ptr = increment_ptr;              
+
+        Token tok1 = get_next_token();
+        Token tok2 = get_next_token();
+
+        // Cazul 1: ++i sau --i (Operator urmat de Variabilă)
+        if (tok1.type == TOKEN_INC || tok1.type == TOKEN_DEC) {
+             append_str(asm_out, &asm_idx, "    mov rax, [var_");
+             append_str(asm_out, &asm_idx, tok2.text);
+             append_str(asm_out, &asm_idx, "]\n");
+             
+             if (tok1.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
+             else append_str(asm_out, &asm_idx, "    dec rax\n");
+             
+             append_str(asm_out, &asm_idx, "    mov [var_");
+             append_str(asm_out, &asm_idx, tok2.text);
+             append_str(asm_out, &asm_idx, "], rax\n");
+        }
+        // Cazul 2: i++ sau i-- (Variabilă urmată de Operator)
+        else if (tok2.type == TOKEN_INC || tok2.type == TOKEN_DEC) {
+             append_str(asm_out, &asm_idx, "    mov rax, [var_");
+             append_str(asm_out, &asm_idx, tok1.text);
+             append_str(asm_out, &asm_idx, "]\n");
+             
+             if (tok2.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
+             else append_str(asm_out, &asm_idx, "    dec rax\n");
+             
+             append_str(asm_out, &asm_idx, "    mov [var_");
+             append_str(asm_out, &asm_idx, tok1.text);
+             append_str(asm_out, &asm_idx, "], rax\n");
+        }
+        // Cazul 3: i = i + 1
+        else if (tok2.type == TOKEN_ASSIGN) {
+            if (is_var_float(tok1.text)) {
+                parse_float_expr(); 
+                append_str(asm_out, &asm_idx, "    movss [var_");
+                append_str(asm_out, &asm_idx, tok1.text);
+                append_str(asm_out, &asm_idx, "], xmm0\n");
+            } else {
+                parse_expr(); 
+                append_str(asm_out, &asm_idx, "    mov [var_");
+                append_str(asm_out, &asm_idx, tok1.text);
+                append_str(asm_out, &asm_idx, "], rax\n");
+            }
+        }
 
         src_ptr = after_body_ptr;
 
@@ -1006,6 +1164,18 @@ void parse_statement_token(Token t) {
         
         append_str(asm_out, &asm_idx, end_label);
         append_str(asm_out, &asm_idx, ":\n");
+    }
+    else if (t.type == TOKEN_RETURN_KW) {
+        parse_expr(); // Evaluează valoarea returnată -> RAX
+        consume_semicolon();
+        
+        // Dacă suntem în funcția "main", chemăm "exit" pentru a încheia programul curat în OS.
+        // Altfel, dacă e funcție normală, chemăm "ret" pentru a ne întoarce la locul apelului.
+        if (str_eq(current_function, "main")) {
+            append_str(asm_out, &asm_idx, "    exit\n");
+        } else {
+            append_str(asm_out, &asm_idx, "    ret\n");
+        }
     }
 }
 
@@ -1032,38 +1202,80 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const char* header = "main:\n";
-    for (int i = 0; header[i] != '\0'; i++) asm_out[asm_idx++] = header[i];
-
+    // --- NOU: Parsare Top-Level (Căutăm definiții de funcții) ---
     Token t = get_next_token();
     while (t.type != TOKEN_EOF) {
-        parse_statement_token(t);
+        
+        // Dacă rândul începe cu un tip de date (int, float, char)
+        if (t.type == TOKEN_INT_KW || t.type == TOKEN_FLOAT_KW || t.type == TOKEN_CHAR_KW) {
+            
+            Token name_tok = get_next_token();
+            
+            // Trecem peste eventualele steluțe de pointer (ex: dacă definim `char* nume_functie()`)
+            while (name_tok.type == TOKEN_STAR) {
+                name_tok = get_next_token();
+            }
+            
+            Token next_tok = get_next_token();
+
+            if (next_tok.type == TOKEN_LPAREN) { // Am dat de '(', deci este o FUNCȚIE!
+                strcpy(current_function, name_tok.text);
+                // 1. Scriem eticheta funcției (ex: "main:\n" sau "suma:\n")
+                append_str(asm_out, &asm_idx, name_tok.text);
+                append_str(asm_out, &asm_idx, ":\n");
+
+                // 2. Sărim peste parametri momentan, până dăm de paranteza închisă ')'
+                Token p = get_next_token();
+                while (p.type != TOKEN_RPAREN && p.type != TOKEN_EOF) {
+                    p = get_next_token();
+                }
+
+                // 3. Așteptăm acolada deschisă '{'
+                Token brace = get_next_token();
+                if (brace.type == TOKEN_LBRACE) {
+                    // Parsăm corpul funcției linie cu linie, până dăm de '}'
+                    Token inner = get_next_token();
+                    while (inner.type != TOKEN_RBRACE && inner.type != TOKEN_EOF) {
+                        parse_statement_token(inner);
+                        inner = get_next_token();
+                    }
+                }
+                /*
+                // 4. Dacă funcția se numește "main", se termină cu exit, altfel cu ret
+                if (str_eq(name_tok.text, "main")) {
+                    append_str(asm_out, &asm_idx, "    exit\n");
+                } else {
+                    // Punem "ret" ca siguranță, în caz că utilizatorul uită "return" la final
+                    append_str(asm_out, &asm_idx, "    ret\n");
+                }
+                */
+            } 
+        }
+        
         t = get_next_token();
     }
 
-    append_str(asm_out, &asm_idx, "    exit\n");
-
+    // --- SECȚIUNEA DE DATE RĂMÂNE LA FEL (Variabile globale și String-uri) ---
     for (int i = 0; i < var_count; i++) {
         append_str(asm_out, &asm_idx, "var_");
         append_str(asm_out, &asm_idx, var_table[i].name);
         append_str(asm_out, &asm_idx, ": data 0\n");
         
-        // Dacă este tablou, alocăm restul de (size - 1) sloturi contigue
+        // Dacă este tablou, alocăm restul sloturilor
         if (var_table[i].is_array) {
             for (int k = 1; k < var_table[i].array_size; k++) {
                 append_str(asm_out, &asm_idx, "    data 0\n");
             }
         }
-		
     }
-	
-	for (int i = 0; i < string_count; i++) {
-			append_str(asm_out, &asm_idx, string_table[i].name);
-			append_str(asm_out, &asm_idx, ": data \"");
-			append_str(asm_out, &asm_idx, string_table[i].value);
-			// Adăugăm un `data 0` suplimentar pentru a asigura null-terminatorul (\0) specific limbajului C
-			append_str(asm_out, &asm_idx, "\"\n    data 0\n"); 
-		}
+    
+    for (int i = 0; i < string_count; i++) {
+        append_str(asm_out, &asm_idx, string_table[i].name);
+        append_str(asm_out, &asm_idx, ": data \"");
+        append_str(asm_out, &asm_idx, string_table[i].value);
+        // Null-terminator \0
+        append_str(asm_out, &asm_idx, "\"\n    data 0\n"); 
+    }
 
     asm_out[asm_idx] = '\0';
 

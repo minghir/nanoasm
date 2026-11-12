@@ -297,8 +297,6 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
         return total_size;
     }
 	
-	// --- PRINT_STR (Printează un string de la adresa aflată în RAX) ---
-    // --- PRINT_STR (Afișează un șir null-terminated de la adresa din RAX) ---
     // --- PRINT_STR (Afișează un șir null-terminated de la adresa din RAX) ---
     if (strcmp(inst->mnemonic, "print_str") == 0) {
         static const uint8_t p_elf[] = {
@@ -406,7 +404,6 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
         }
     }
     // --- PUSH & POP ---
-    // --- PUSH & POP ---
     if (strcmp(inst->mnemonic, "push") == 0) {
         uint8_t opcode = 0x50; // default rax
         if (strcmp(inst->op1, "rcx") == 0) opcode = 0x51;
@@ -508,22 +505,51 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
         return g_generate_elf ? 33 : 11;
     }
 
-    // --- DEC RDI ---
-    if (strcmp(inst->mnemonic, "dec") == 0 && strcmp(inst->op1, "rdi") == 0) {
-        if (bin_buffer) {
-            bin_buffer[(*bin_idx)++] = 0x48;
-            bin_buffer[(*bin_idx)++] = 0xFF;
-            bin_buffer[(*bin_idx)++] = 0xCF;
-            nano_print("  [ASM] dec rdi -> opcod generat\n");
+    // --- INC & DEC (Generice pe 64 de biți) ---
+    if (strcmp(inst->mnemonic, "inc") == 0 || strcmp(inst->mnemonic, "dec") == 0) {
+        int reg = get_reg_code(inst->op1);
+        if (reg != -1) {
+            if (bin_buffer) {
+                bin_buffer[(*bin_idx)++] = 0x48; // Prefixul REX.W (64-bit)
+                bin_buffer[(*bin_idx)++] = 0xFF; // Opcode bază pentru inc/dec
+                
+                if (strcmp(inst->mnemonic, "inc") == 0) {
+                    bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 + reg);
+                } else {
+                    bin_buffer[(*bin_idx)++] = (uint8_t)(0xC8 + reg);
+                }
+                nano_print("  [ASM] inc/dec reg -> opcod generat\n");
+            }
+            return 3;
         }
-        return 3;
     }
 
     // --- MOV ---
-    // --- MOV ---
-    // --- MOV ---
     if (strcmp(inst->mnemonic, "mov") == 0) {
-        
+        // Cazul 1a.1: mov [reg], al (ex: mov [rbx], al) -> 2 octeți
+        if (strcmp(inst->op2, "al") == 0) {
+            char mem_name[32];
+            int m_i = 0, m_j = 0;
+            while (inst->op1[m_i] != '\0') {
+                if (inst->op1[m_i] != '[' && inst->op1[m_i] != ']') {
+                    mem_name[m_j++] = inst->op1[m_i];
+                }
+                m_i++;
+            }
+            mem_name[m_j] = '\0';
+
+            int dest_reg = get_reg_code(mem_name);
+            if (dest_reg != -1) {
+                if (bin_buffer) {
+                    bin_buffer[(*bin_idx)++] = 0x88; // MOV r/m8, r8
+                    bin_buffer[(*bin_idx)++] = (uint8_t)dest_reg; // ModRM
+                    nano_print("   [ASM] mov [reg], al -> opcod generat\n");
+                }
+                return 2;
+            }
+        }
+
+
         // Cazul 1: mov [dest], src
         if (inst->op1[0] == '[') {
             char mem_name[32];
@@ -879,129 +905,6 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
     }
 
     // --- MOVSS (Float Load / Store / Move) ---
-	/*
-    if (strcmp(inst->mnemonic, "movss") == 0) {
-        if (inst->op1[0] == 'x' && inst->op1[1] == 'm' && inst->op1[2] == 'm' &&
-            inst->op2[0] == 'x' && inst->op2[1] == 'm' && inst->op2[2] == 'm') {
-            
-            int xmm_dest = inst->op1[3] - '0';
-            int xmm_src  = inst->op2[3] - '0';
-
-            if (xmm_dest >= 0 && xmm_dest <= 7 && xmm_src >= 0 && xmm_src <= 7) {
-                if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0xF3;
-                    bin_buffer[(*bin_idx)++] = 0x0F;
-                    bin_buffer[(*bin_idx)++] = 0x10;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 | (xmm_dest << 3) | xmm_src);
-                    nano_print("  [ASM] movss xmm, xmm -> opcod generat\n");
-                }
-                return 4;
-            }
-        }
-
-        if (inst->op2[0] == '[') {
-            char reg_name[16];
-            strcpy(reg_name, inst->op1);
-
-            int xmm_code = -1;
-            if (reg_name[0] == 'x' && reg_name[1] == 'm' && reg_name[2] == 'm') {
-                xmm_code = reg_name[3] - '0';
-            }
-
-            if (xmm_code >= 0 && xmm_code <= 7) {
-                char mem_name[32];
-                int m_i = 0, m_j = 0;
-                while (inst->op2[m_i] != '\0') {
-                    if (inst->op2[m_i] != '[' && inst->op2[m_i] != ']') {
-                        mem_name[m_j++] = inst->op2[m_i];
-                    }
-                    m_i++;
-                }
-                mem_name[m_j] = '\0';
-
-                int target_offset = -1;
-                for (int l = 0; l < label_count; l++) {
-                    if (strcmp(labels[l].name, mem_name) == 0) {
-                        target_offset = labels[l].offset;
-                        break;
-                    }
-                }
-
-                if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0xF3;
-                    bin_buffer[(*bin_idx)++] = 0x0F;
-                    bin_buffer[(*bin_idx)++] = 0x10;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((xmm_code << 3) | 0x05);
-
-                    int disp_pos = *bin_idx;
-                    *bin_idx += 4;
-                    int32_t disp32 = target_offset - (disp_pos + 4);
-
-                    bin_buffer[disp_pos + 0] = (uint8_t)(disp32 & 0xFF);
-                    bin_buffer[disp_pos + 1] = (uint8_t)((disp32 >> 8) & 0xFF);
-                    bin_buffer[disp_pos + 2] = (uint8_t)((disp32 >> 16) & 0xFF);
-                    bin_buffer[disp_pos + 3] = (uint8_t)((disp32 >> 24) & 0xFF);
-
-                    nano_print("  [ASM] movss xmm, [var] -> opcod generat\n");
-                }
-                return 8;
-            }
-        }
-        
-        if (inst->op1[0] == '[') {
-            char reg_name[16];
-            strcpy(reg_name, inst->op2);
-
-            int xmm_code = -1;
-            if (reg_name[0] == 'x' && reg_name[1] == 'm' && reg_name[2] == 'm') {
-                xmm_code = reg_name[3] - '0';
-            }
-
-            if (xmm_code >= 0 && xmm_code <= 7) {
-                char mem_name[32];
-                int m_i = 0, m_j = 0;
-                while (inst->op1[m_i] != '\0') {
-                    if (inst->op1[m_i] != '[' && inst->op1[m_i] != ']') {
-                        mem_name[m_j++] = inst->op1[m_i];
-                    }
-                    m_i++;
-                }
-                mem_name[m_j] = '\0';
-
-                int target_offset = -1;
-                for (int l = 0; l < label_count; l++) {
-                    if (strcmp(labels[l].name, mem_name) == 0) {
-                        target_offset = labels[l].offset;
-                        break;
-                    }
-                }
-
-                if (bin_buffer) {
-                    bin_buffer[(*bin_idx)++] = 0xF3;
-                    bin_buffer[(*bin_idx)++] = 0x0F;
-                    bin_buffer[(*bin_idx)++] = 0x11;
-                    bin_buffer[(*bin_idx)++] = (uint8_t)((xmm_code << 3) | 0x05);
-
-                    int disp_pos = *bin_idx;
-                    *bin_idx += 4;
-                    int32_t disp32 = target_offset - (disp_pos + 4);
-
-                    bin_buffer[disp_pos + 0] = (uint8_t)(disp32 & 0xFF);
-                    bin_buffer[disp_pos + 1] = (uint8_t)((disp32 >> 8) & 0xFF);
-                    bin_buffer[disp_pos + 2] = (uint8_t)((disp32 >> 16) & 0xFF);
-                    bin_buffer[disp_pos + 3] = (uint8_t)((disp32 >> 24) & 0xFF);
-
-                    nano_print("  [ASM] movss [var], xmm -> opcod generat\n");
-                }
-                return 8;
-            }
-        }
-    }
-	*/
-	
-	// --- MOVSS (Float Load / Store / Move) ---
-    // --- MOVSS ---
-    // --- MOVSS ---
     if (strcmp(inst->mnemonic, "movss") == 0) {
         
         // Cazul 1: movss xmm, xmm
@@ -1132,9 +1035,7 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
             }
         }
     }
-	
-    // --- PRINT_XMM ---
-    // --- PRINT_XMM (Cu suport pentru zecimale ftoa) ---
+    
     // --- PRINT_XMM (Cu suport complet ftoa - 2 zecimale) ---
     if (strcmp(inst->mnemonic, "print_xmm") == 0) {
         static const uint8_t ftoa_linux[] = {
@@ -1373,7 +1274,17 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
         }
         return 3;
     }
-
+/*
+    if (strcmp(inst->mnemonic, "add") == 0 && strcmp(inst->op1, "rax") == 0 && strcmp(inst->op2, "rbx") == 0) {
+        if (bin_buffer) {
+            bin_buffer[(*bin_idx)++] = 0x48;
+            bin_buffer[(*bin_idx)++] = 0x01;
+            bin_buffer[(*bin_idx)++] = 0xD8;
+        }
+        return 3;
+    }
+*/
+    // Cazul existent: add rax, rbx
     if (strcmp(inst->mnemonic, "add") == 0 && strcmp(inst->op1, "rax") == 0 && strcmp(inst->op2, "rbx") == 0) {
         if (bin_buffer) {
             bin_buffer[(*bin_idx)++] = 0x48;
@@ -1383,6 +1294,15 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
         return 3;
     }
 
+    // --- NOU: Adaugăm cazul add rbx, rax ---
+    if (strcmp(inst->mnemonic, "add") == 0 && strcmp(inst->op1, "rbx") == 0 && strcmp(inst->op2, "rax") == 0) {
+        if (bin_buffer) {
+            bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+            bin_buffer[(*bin_idx)++] = 0x01; // ADD
+            bin_buffer[(*bin_idx)++] = 0xC3; // ModRM pentru rbx, rax
+        }
+        return 3;
+    }
     if (strcmp(inst->mnemonic, "sub") == 0 && strcmp(inst->op1, "rax") == 0 && strcmp(inst->op2, "rbx") == 0) {
         if (bin_buffer) {
             bin_buffer[(*bin_idx)++] = 0x48;
@@ -1399,6 +1319,34 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
             bin_buffer[(*bin_idx)++] = 0xD0;
         }
         return 3;
+    }
+
+    // --- MOVZX (Citire 1 octet extins cu zero în registru 64-bit) ---
+    if (strcmp(inst->mnemonic, "movzx") == 0) {
+        int dest_reg = get_reg_code(inst->op1);
+        if (dest_reg != -1 && inst->op2[0] == '[') {
+            char mem_name[32];
+            int m_i = 0, m_j = 0;
+            while (inst->op2[m_i] != '\0') {
+                if (inst->op2[m_i] != '[' && inst->op2[m_i] != ']') {
+                    mem_name[m_j++] = inst->op2[m_i];
+                }
+                m_i++;
+            }
+            mem_name[m_j] = '\0';
+
+            int src_reg = get_reg_code(mem_name); // ex: rbx din [rbx]
+            if (src_reg != -1) {
+                if (bin_buffer) {
+                    bin_buffer[(*bin_idx)++] = 0x48; // REX.W
+                    bin_buffer[(*bin_idx)++] = 0x0F;
+                    bin_buffer[(*bin_idx)++] = 0xB6; // MOVZX r64, r/m8
+                    bin_buffer[(*bin_idx)++] = (uint8_t)((dest_reg << 3) | src_reg); // ModRM
+                    nano_print("   [ASM] movzx reg, [reg] -> opcod generat\n");
+                }
+                return 4;
+            }
+        }
     }
 
     return -1;
