@@ -6,7 +6,7 @@ typedef enum {
     TOKEN_EQ, TOKEN_NE, TOKEN_GT, TOKEN_LT, TOKEN_GE, TOKEN_LE,
     TOKEN_SEMICOLON, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE,
 	TOKEN_LBRACKET, TOKEN_RBRACKET,
-    TOKEN_AND, TOKEN_OR, TOKEN_NOT, TOKEN_AMPERSAND,
+    TOKEN_AND, TOKEN_OR, TOKEN_NOT, TOKEN_AMPERSAND, TOKEN_COMMA,
     TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_MOD, TOKEN_INC, TOKEN_DEC, TOKEN_UNKNOWN
 } TokenType;
 
@@ -315,8 +315,44 @@ void parse_factor() {
     } else if (t.type == TOKEN_IDENTIFIER) {
         const char* saved_ptr = src_ptr;
         Token next = get_next_token();
-        
-        if (next.type == TOKEN_LBRACKET) {
+        // --- APEL DE FUNCȚIE ---
+        if (next.type == TOKEN_LPAREN) {
+            int arg_count = 0;
+            
+            // Verificăm dacă sunt argumente sau e paranteză goală
+            const char* check_ptr = src_ptr;
+            Token empty_chk = get_next_token();
+            if (empty_chk.type != TOKEN_RPAREN) {
+                src_ptr = check_ptr; // Dăm înapoi, avem argumente!
+                while (1) {
+                    parse_expr(); // Evaluează parametrul -> Rezultatul e pus în RAX
+                    append_str(asm_out, &asm_idx, "    push rax\n"); // Salvăm temporar pe stivă
+                    arg_count++;
+                    
+                    Token sep = get_next_token();
+                    if (sep.type == TOKEN_RPAREN) break; // Gata!
+                    if (sep.type != TOKEN_COMMA) break;  // Ar trebui să dea eroare de sintaxă
+                }
+            }
+            
+            // Scoatem argumentele de pe stivă în registrele de sistem (în ordine INVERSĂ)
+            const char* arg_regs[] = {"rdi", "rsi", "rdx", "rcx"};
+            for (int i = arg_count - 1; i >= 0; i--) {
+                if (i < 4) {
+                    append_str(asm_out, &asm_idx, "    pop ");
+                    append_str(asm_out, &asm_idx, arg_regs[i]);
+                    append_str(asm_out, &asm_idx, "\n");
+                } else {
+                    append_str(asm_out, &asm_idx, "    pop rax\n"); // Aruncăm dacă sunt prea multe
+                }
+            }
+            
+            // Efectuăm apelul
+            append_str(asm_out, &asm_idx, "    call ");
+            append_str(asm_out, &asm_idx, t.text);
+            append_str(asm_out, &asm_idx, "\n");
+        }
+        else if (next.type == TOKEN_LBRACKET) {
             parse_expr(); // Indexul i -> RAX
             get_next_token(); // Consumă ']'
             
@@ -697,6 +733,7 @@ Token get_next_token() {
         case '%': token.type = TOKEN_MOD; break;
 		case '[': token.type = TOKEN_LBRACKET; break;
         case ']': token.type = TOKEN_RBRACKET; break;
+        case ',': token.type = TOKEN_COMMA; break;
         default:  token.type = TOKEN_UNKNOWN; break;
     }
     
@@ -1203,6 +1240,15 @@ int main(int argc, char** argv) {
     }
 
     // --- NOU: Parsare Top-Level (Căutăm definiții de funcții) ---
+    if (nano_create_file(argv[2], 0) != 0) {
+        nano_print("[nanoc] Eroare la crearea fisierului .s de iesire!\n");
+        return 1;
+    }
+
+    // --- NOU: Bootstrap / Entry Point ---
+    // Forțăm programul să sară mereu la main, indiferent de ordinea funcțiilor!
+    append_str(asm_out, &asm_idx, "    jmp main\n");
+
     Token t = get_next_token();
     while (t.type != TOKEN_EOF) {
         
@@ -1218,38 +1264,75 @@ int main(int argc, char** argv) {
             
             Token next_tok = get_next_token();
 
-            if (next_tok.type == TOKEN_LPAREN) { // Am dat de '(', deci este o FUNCȚIE!
+            if (next_tok.type == TOKEN_LPAREN) { // Este o FUNCȚIE (definiție sau prototip)!
+                
                 strcpy(current_function, name_tok.text);
-                // 1. Scriem eticheta funcției (ex: "main:\n" sau "suma:\n")
-                append_str(asm_out, &asm_idx, name_tok.text);
-                append_str(asm_out, &asm_idx, ":\n");
 
-                // 2. Sărim peste parametri momentan, până dăm de paranteza închisă ')'
+                // --- 1. Sărim peste parametri dar îi stocăm temporar ---
+                char temp_params[4][32];
+                int param_count = 0;
+                
                 Token p = get_next_token();
                 while (p.type != TOKEN_RPAREN && p.type != TOKEN_EOF) {
-                    p = get_next_token();
+                    if (p.type == TOKEN_INT_KW || p.type == TOKEN_CHAR_KW || p.type == TOKEN_FLOAT_KW) {
+                        int is_char = (p.type == TOKEN_CHAR_KW);
+                        
+                        // Sărim peste steluțele de pointer dacă parametrul e de tip pointer (ex: char* str)
+                        Token p_next = get_next_token();
+                        while (p_next.type == TOKEN_STAR) {
+                            p_next = get_next_token();
+                        }
+                        
+                        strcpy(temp_params[param_count], p_next.text);
+                        register_variable(p_next.text, 0, 0, 0, is_char);
+                        param_count++;
+                    }
+                    p = get_next_token(); // Trece peste virgule sau alte token-uri
                 }
 
-                // 3. Așteptăm acolada deschisă '{'
+                // --- 2. Verificăm dacă e definiție '{' sau prototip ';' ---
                 Token brace = get_next_token();
-                if (brace.type == TOKEN_LBRACE) {
-                    // Parsăm corpul funcției linie cu linie, până dăm de '}'
+                
+                if (brace.type == TOKEN_SEMICOLON) {
+                    // ESTE DOAR UN PROTOTIP (Forward Declaration)!
+                    // Perfect pentru viitoarele #include "header.h".
+                    // Dăm 'continue' ca să reluăm bucla mare fără să generăm cod Assembly.
+                    t = get_next_token();
+                    continue; 
+                } 
+                else if (brace.type == TOKEN_LBRACE) {
+                    // ESTE O DEFINIȚIE REALĂ!
+                    // Scriem abia acum eticheta funcției
+                    append_str(asm_out, &asm_idx, name_tok.text);
+                    append_str(asm_out, &asm_idx, ":\n");
+                    
+                    // Descărcăm parametrii din registrele X86_64 în variabilele din memorie
+                    const char* arg_regs[] = {"rdi", "rsi", "rdx", "rcx"};
+                    for(int i = 0; i < param_count; i++) {
+                        if (i < 4) {
+                            append_str(asm_out, &asm_idx, "    mov [var_");
+                            append_str(asm_out, &asm_idx, temp_params[i]);
+                            append_str(asm_out, &asm_idx, "], ");
+                            append_str(asm_out, &asm_idx, arg_regs[i]);
+                            append_str(asm_out, &asm_idx, "\n");
+                        }
+                    }
+
+                    // Parsăm corpul funcției
                     Token inner = get_next_token();
                     while (inner.type != TOKEN_RBRACE && inner.type != TOKEN_EOF) {
                         parse_statement_token(inner);
                         inner = get_next_token();
                     }
+                    
+                    // Încheierea funcției
+                    if (str_eq(name_tok.text, "main")) {
+                        append_str(asm_out, &asm_idx, "    exit\n");
+                    } else {
+                        append_str(asm_out, &asm_idx, "    ret\n");
+                    }
                 }
-                /*
-                // 4. Dacă funcția se numește "main", se termină cu exit, altfel cu ret
-                if (str_eq(name_tok.text, "main")) {
-                    append_str(asm_out, &asm_idx, "    exit\n");
-                } else {
-                    // Punem "ret" ca siguranță, în caz că utilizatorul uită "return" la final
-                    append_str(asm_out, &asm_idx, "    ret\n");
-                }
-                */
-            } 
+            }
         }
         
         t = get_next_token();
