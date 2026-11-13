@@ -8,7 +8,8 @@ typedef enum {
     TOKEN_SEMICOLON, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE,
     TOKEN_LBRACKET, TOKEN_RBRACKET,
     TOKEN_AND, TOKEN_OR, TOKEN_NOT, TOKEN_AMPERSAND, TOKEN_COMMA,
-    TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_MOD, TOKEN_INC, TOKEN_DEC, TOKEN_UNKNOWN
+    TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_MOD, TOKEN_INC, TOKEN_DEC, 
+	TOKEN_STRUCT_KW, TOKEN_DOT, TOKEN_ARROW, TOKEN_UNKNOWN
 } TokenType;
 
 typedef struct {
@@ -18,12 +19,34 @@ typedef struct {
 
 typedef struct {
     char name[32];
+    int offset;
+    int is_float;
+    int is_pointer;
+    int pointer_level;
+    int is_char;
+    char struct_type[32];
+} StructField;
+
+typedef struct {
+    char name[32];
+    StructField fields[32];
+    int field_count;
+    int total_size;
+} StructDef;
+
+StructDef struct_table[32];
+int struct_count = 0;
+
+typedef struct {
+    char name[32];
     int is_float;
     int is_pointer;
     int is_char;
     int pointer_level;
     int is_array;
     int array_size;
+    int is_struct;
+    char struct_type[32];
     int is_local;
     int stack_offset;
     int has_init;
@@ -96,6 +119,243 @@ void parse_factor();
 void parse_statement();
 void consume_semicolon();
 
+Variable* find_var(const char* name);
+void append_var_ref(char* dest, int* idx, const char* name);
+
+
+StructDef* find_struct(const char* name) {
+    for (int i = 0; i < struct_count; i++) {
+        if (strcmp(struct_table[i].name, name) == 0) return &struct_table[i];
+    }
+    return 0;
+}
+
+StructField* find_struct_field(StructDef* sd, const char* field_name) {
+    if (!sd) return 0;
+    for (int i = 0; i < sd->field_count; i++) {
+        if (strcmp(sd->fields[i].name, field_name) == 0) return &sd->fields[i];
+    }
+    return 0;
+}
+
+void register_struct_var(const char* name, const char* struct_type, int is_pointer, int pointer_level) {
+    for (int i = 0; i < local_var_count; i++) {
+        if (strcmp(local_var_table[i].name, name) == 0) return;
+    }
+    StructDef* sd = find_struct(struct_type);
+    int alloc_size = (is_pointer || !sd) ? 8 : sd->total_size;
+    if (alloc_size < 8) alloc_size = 8;
+
+    current_stack_offset += alloc_size;
+    strcpy(local_var_table[local_var_count].name, name);
+    local_var_table[local_var_count].is_float = 0;
+    local_var_table[local_var_count].is_pointer = is_pointer;
+    local_var_table[local_var_count].pointer_level = pointer_level;
+    local_var_table[local_var_count].is_char = 0;
+    local_var_table[local_var_count].is_array = 0;
+    local_var_table[local_var_count].array_size = 0;
+    local_var_table[local_var_count].is_struct = 1;
+    strcpy(local_var_table[local_var_count].struct_type, struct_type);
+    local_var_table[local_var_count].is_local = 1;
+    local_var_table[local_var_count].stack_offset = current_stack_offset;
+    local_var_count++;
+}
+
+void register_struct_array(const char* name, const char* struct_type, int is_pointer, int pointer_level, int array_size) {
+    for (int i = 0; i < local_var_count; i++) {
+        if (strcmp(local_var_table[i].name, name) == 0) return;
+    }
+    StructDef* sd = find_struct(struct_type);
+    int elem_size = (is_pointer || !sd) ? 8 : sd->total_size;
+    if (elem_size < 8) elem_size = 8;
+
+    current_stack_offset += array_size * elem_size;
+    strcpy(local_var_table[local_var_count].name, name);
+    local_var_table[local_var_count].is_float = 0;
+    local_var_table[local_var_count].is_pointer = is_pointer;
+    local_var_table[local_var_count].pointer_level = pointer_level;
+    local_var_table[local_var_count].is_char = 0;
+    local_var_table[local_var_count].is_array = 1;
+    local_var_table[local_var_count].array_size = array_size;
+    local_var_table[local_var_count].is_struct = 1;
+    strcpy(local_var_table[local_var_count].struct_type, struct_type);
+    local_var_table[local_var_count].is_local = 1;
+    local_var_table[local_var_count].stack_offset = current_stack_offset;
+    local_var_count++;
+}
+
+// Evaluează expresia de index [...] și pune în RAX adresa elementului arr[i]
+void emit_struct_array_elem_addr(Variable* v) {
+    parse_expr();
+    get_next_token(); // consumă ']'
+
+    StructDef* sd = find_struct(v->struct_type);
+    int elem_is_ptr = (v->is_array && v->pointer_level > 0) || (!v->is_array && v->pointer_level > 1);
+    int elem_size = (elem_is_ptr || !sd) ? 8 : sd->total_size;
+    if (elem_size < 8) elem_size = 8;
+
+    append_str(asm_out, &asm_idx, "    mov rbx, ");
+    append_int(asm_out, &asm_idx, elem_size);
+    append_str(asm_out, &asm_idx, "\n    imul rbx\n");
+
+    if (v->pointer_level > 0) {
+        append_str(asm_out, &asm_idx, "    mov rbx, ");
+    } else {
+        append_str(asm_out, &asm_idx, "    lea rbx, ");
+    }
+    append_var_ref(asm_out, &asm_idx, v->name);
+    append_str(asm_out, &asm_idx, "\n    add rax, rbx\n");
+}
+
+void parse_struct_definition(const char* struct_name) {
+    StructDef* sd = find_struct(struct_name);
+    if (!sd) {
+        sd = &struct_table[struct_count++];
+        strcpy(sd->name, struct_name);
+    }
+    sd->field_count = 0;
+    sd->total_size = 0;
+
+    Token ft = get_next_token();
+    while (ft.type != TOKEN_RBRACE && ft.type != TOKEN_EOF) {
+        int f_float = 0, f_char = 0, f_ptr = 0, f_lvl = 0;
+        char f_struct[32] = "";
+
+        if (ft.type == TOKEN_STRUCT_KW) {
+            Token st_tok = get_next_token();
+            strcpy(f_struct, st_tok.text);
+        } else {
+            f_float = (ft.type == TOKEN_FLOAT_KW);
+            f_char  = (ft.type == TOKEN_CHAR_KW);
+        }
+
+        Token fn_tok = get_next_token();
+        while (fn_tok.type == TOKEN_STAR) {
+            f_ptr = 1;
+            f_lvl++;
+            fn_tok = get_next_token();
+        }
+
+        StructDef* nested = (f_struct[0] != '\0' && f_lvl == 0) ? find_struct(f_struct) : 0;
+        int field_bytes = nested ? nested->total_size : 8;
+
+        StructField* sf = &sd->fields[sd->field_count++];
+        strcpy(sf->name, fn_tok.text);
+        sf->offset = sd->total_size;
+        sf->is_float = f_float;
+        sf->is_pointer = f_ptr;
+        sf->pointer_level = f_lvl;
+        sf->is_char = f_char;
+        strcpy(sf->struct_type, f_struct);
+
+        sd->total_size += field_bytes;
+        consume_semicolon();
+        ft = get_next_token();
+    }
+    consume_semicolon();
+}
+
+// Rezolvă câmpurile (. sau ->) pornind de la adresa de bază aflată deja în RAX
+StructField* resolve_member_from_base(StructDef* cur_sd, Token first_op) {
+    if (!cur_sd) return 0;
+
+    if (first_op.type == TOKEN_ARROW) {
+        append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+    }
+
+    Token op = first_op;
+    StructField* sf = 0;
+    while (op.type == TOKEN_DOT || op.type == TOKEN_ARROW) {
+        Token field_tok = get_next_token();
+        sf = find_struct_field(cur_sd, field_tok.text);
+        if (!sf) return 0;
+
+        if (sf->offset > 0) {
+            append_str(asm_out, &asm_idx, "    mov rbx, ");
+            append_int(asm_out, &asm_idx, sf->offset);
+            append_str(asm_out, &asm_idx, "\n    add rax, rbx\n");
+        }
+
+        const char* saved = src_ptr;
+        Token next_op = get_next_token();
+        if (next_op.type == TOKEN_DOT || next_op.type == TOKEN_ARROW) {
+            if (next_op.type == TOKEN_ARROW) {
+                append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+            }
+            cur_sd = find_struct(sf->struct_type);
+            if (!cur_sd) return 0;
+            op = next_op;
+        } else {
+            src_ptr = saved;
+            break;
+        }
+    }
+    return sf;
+}
+
+StructField* resolve_member_address(const char* var_name, Token first_op) {
+    Variable* v = find_var(var_name);
+    if (!v || !v->is_struct) return 0;
+    StructDef* cur_sd = find_struct(v->struct_type);
+    if (!cur_sd) return 0;
+
+    append_str(asm_out, &asm_idx, "    lea rax, ");
+    append_var_ref(asm_out, &asm_idx, var_name);
+    append_str(asm_out, &asm_idx, "\n");
+
+    return resolve_member_from_base(cur_sd, first_op);
+}
+
+// Lookahead fără emisie de cod pornind de la un StructDef (folosit după [i])
+StructField* peek_member_from_struct(StructDef* cur_sd) {
+    if (!cur_sd) return 0;
+    Token op = get_next_token();
+    StructField* sf = 0;
+    while (op.type == TOKEN_DOT || op.type == TOKEN_ARROW) {
+        Token field_tok = get_next_token();
+        sf = find_struct_field(cur_sd, field_tok.text);
+        if (!sf) break;
+        Token next_op = get_next_token();
+        if (next_op.type == TOKEN_DOT || next_op.type == TOKEN_ARROW) {
+            cur_sd = find_struct(sf->struct_type);
+            if (!cur_sd) { sf = 0; break; }
+            op = next_op;
+        } else {
+            break;
+        }
+    }
+    return sf;
+}
+
+// Lookahead fără emisie de cod pentru a afla tipul câmpului în expresii/print
+StructField* peek_member_field(const char* var_name) {
+    const char* saved = src_ptr;
+    Variable* v = find_var(var_name);
+    if (!v || !v->is_struct) return 0;
+    StructDef* cur_sd = find_struct(v->struct_type);
+    if (!cur_sd) return 0;
+
+    Token op = get_next_token();
+    StructField* sf = 0;
+    while (op.type == TOKEN_DOT || op.type == TOKEN_ARROW) {
+        Token field_tok = get_next_token();
+        sf = find_struct_field(cur_sd, field_tok.text);
+        if (!sf) break;
+        Token next_op = get_next_token();
+        if (next_op.type == TOKEN_DOT || next_op.type == TOKEN_ARROW) {
+            cur_sd = find_struct(sf->struct_type);
+            if (!cur_sd) { sf = 0; break; }
+            op = next_op;
+        } else {
+            break;
+        }
+    }
+    src_ptr = saved;
+    return sf;
+}
+
+
+
 Variable* find_var(const char* name) {
     for (int i = 0; i < local_var_count; i++) {
         if (strcmp(local_var_table[i].name, name) == 0) return &local_var_table[i];
@@ -160,6 +420,9 @@ void register_global_array(const char* name, int is_float, int is_char, int size
 }
 
 void register_variable(const char* name, int is_float, int is_pointer, int pointer_level, int is_char) {
+	local_var_table[local_var_count].is_struct = 0;
+    local_var_table[local_var_count].struct_type[0] = '\0';
+	
     for (int i = 0; i < local_var_count; i++) {
         if (strcmp(local_var_table[i].name, name) == 0) return;
     }
@@ -177,6 +440,9 @@ void register_variable(const char* name, int is_float, int is_pointer, int point
 }
 
 void register_array(const char* name, int is_float, int is_char, int size) {
+	local_var_table[local_var_count].is_struct = 0;
+    local_var_table[local_var_count].struct_type[0] = '\0';
+	
     for (int i = 0; i < local_var_count; i++) {
         if (strcmp(local_var_table[i].name, name) == 0) return;
     }
@@ -300,19 +566,29 @@ void parse_float_factor() {
             emit_function_call(t.text);
         }
         else if (next.type == TOKEN_LBRACKET) {
-            parse_expr();
-            get_next_token();
-            
-            append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
-            append_str(asm_out, &asm_idx, "    imul rbx\n");
-            if (get_var_pointer_level(t.text) > 0) {
-				append_str(asm_out, &asm_idx, "    mov rbx, ");
-			} else {
-				append_str(asm_out, &asm_idx, "    lea rbx, ");
-			}
-            append_var_ref(asm_out, &asm_idx, t.text);
-            append_str(asm_out, &asm_idx, "\n");
-            append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+            Variable* v = find_var(t.text);
+            if (v && v->is_struct) {
+                emit_struct_array_elem_addr(v);
+                Token mop = get_next_token();
+                if (mop.type == TOKEN_DOT || mop.type == TOKEN_ARROW) {
+                    resolve_member_from_base(find_struct(v->struct_type), mop);
+                }
+                append_str(asm_out, &asm_idx, "    movss xmm0, [rax]\n");
+            } else {
+                parse_expr();
+                get_next_token();
+                append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
+                append_str(asm_out, &asm_idx, "    imul rbx\n");
+                if (get_var_pointer_level(t.text) > 0) {
+                    append_str(asm_out, &asm_idx, "    mov rbx, ");
+                } else {
+                    append_str(asm_out, &asm_idx, "    lea rbx, ");
+                }
+                append_var_ref(asm_out, &asm_idx, t.text);
+                append_str(asm_out, &asm_idx, "\n    add rax, rbx\n    movss xmm0, [rax]\n");
+            }
+        } else if (next.type == TOKEN_DOT || next.type == TOKEN_ARROW) {
+            resolve_member_address(t.text, next);
             append_str(asm_out, &asm_idx, "    movss xmm0, [rax]\n");
         } else {
             src_ptr = saved_ptr;
@@ -424,32 +700,53 @@ void parse_factor() {
             emit_function_call(t.text);
         }
         else if (next.type == TOKEN_LBRACKET) {
-            parse_expr();
-            get_next_token();
-            
-            if (is_var_str_ptr(t.text) || is_var_base_char(t.text)) {
-                if (is_var_str_ptr(t.text)) {
-                    append_str(asm_out, &asm_idx, "    mov rbx, ");
-                    append_var_ref(asm_out, &asm_idx, t.text);
-                    append_str(asm_out, &asm_idx, "\n");
+            Variable* v = find_var(t.text);
+            if (v && v->is_struct) {
+                emit_struct_array_elem_addr(v);
+                const char* after_idx = src_ptr;
+                Token mop = get_next_token();
+                if (mop.type == TOKEN_DOT || mop.type == TOKEN_ARROW) {
+                    StructField* sf = resolve_member_from_base(find_struct(v->struct_type), mop);
+                    if (sf && sf->is_char && sf->pointer_level == 0) {
+                        append_str(asm_out, &asm_idx, "    movzx rax, [rax]\n");
+                    } else {
+                        append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+                    }
                 } else {
-                    append_str(asm_out, &asm_idx, "    lea rbx, ");
-                    append_var_ref(asm_out, &asm_idx, t.text);
-                    append_str(asm_out, &asm_idx, "\n");
+                    src_ptr = after_idx;
+                    int elem_is_ptr = (v->is_array && v->pointer_level > 0) || (!v->is_array && v->pointer_level > 1);
+                    if (elem_is_ptr) {
+                        append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
+                    }
                 }
-                append_str(asm_out, &asm_idx, "    add rbx, rax\n");
-                append_str(asm_out, &asm_idx, "    movzx rax, [rbx]\n");
             } else {
-                append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
-                append_str(asm_out, &asm_idx, "    imul rbx\n");
-                if (get_var_pointer_level(t.text) > 0) {
-                    append_str(asm_out, &asm_idx, "    mov rbx, ");
+                parse_expr();
+                get_next_token();
+
+                if (is_var_str_ptr(t.text) || is_var_base_char(t.text)) {
+                    if (is_var_str_ptr(t.text)) {
+                        append_str(asm_out, &asm_idx, "    mov rbx, ");
+                    } else {
+                        append_str(asm_out, &asm_idx, "    lea rbx, ");
+                    }
+                    append_var_ref(asm_out, &asm_idx, t.text);
+                    append_str(asm_out, &asm_idx, "\n    add rbx, rax\n    movzx rax, [rbx]\n");
                 } else {
-                    append_str(asm_out, &asm_idx, "    lea rbx, ");
+                    append_str(asm_out, &asm_idx, "    mov rbx, 8\n    imul rbx\n");
+                    if (get_var_pointer_level(t.text) > 0) {
+                        append_str(asm_out, &asm_idx, "    mov rbx, ");
+                    } else {
+                        append_str(asm_out, &asm_idx, "    lea rbx, ");
+                    }
+                    append_var_ref(asm_out, &asm_idx, t.text);
+                    append_str(asm_out, &asm_idx, "\n    add rax, rbx\n    mov rax, [rax]\n");
                 }
-                append_var_ref(asm_out, &asm_idx, t.text);
-                append_str(asm_out, &asm_idx, "\n");
-                append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+            }
+        } else if (next.type == TOKEN_DOT || next.type == TOKEN_ARROW) {
+            StructField* sf = resolve_member_address(t.text, next);
+            if (sf && sf->is_char && sf->pointer_level == 0) {
+                append_str(asm_out, &asm_idx, "    movzx rax, [rax]\n");
+            } else {
                 append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
             }
         } else {
@@ -464,9 +761,41 @@ void parse_factor() {
         }
     } else if (t.type == TOKEN_AMPERSAND) {
         Token var_tok = get_next_token();
-        append_str(asm_out, &asm_idx, "    lea rax, ");
-        append_var_ref(asm_out, &asm_idx, var_tok.text);
-        append_str(asm_out, &asm_idx, "\n");
+        const char* saved_amp = src_ptr;
+        Token after_var = get_next_token();
+        if (after_var.type == TOKEN_DOT || after_var.type == TOKEN_ARROW) {
+            resolve_member_address(var_tok.text, after_var);
+        } else if (after_var.type == TOKEN_LBRACKET) {
+            Variable* v = find_var(var_tok.text);
+            if (v && v->is_struct) {
+                emit_struct_array_elem_addr(v);
+                const char* after_idx = src_ptr;
+                Token mop = get_next_token();
+                if (mop.type == TOKEN_DOT || mop.type == TOKEN_ARROW) {
+                    resolve_member_from_base(find_struct(v->struct_type), mop);
+                } else {
+                    src_ptr = after_idx;
+                }
+            } else {
+                parse_expr();
+                get_next_token();
+                if (!(v && (v->is_char && (v->is_array || v->pointer_level == 1)))) {
+                    append_str(asm_out, &asm_idx, "    mov rbx, 8\n    imul rbx\n");
+                }
+                if (v && v->pointer_level > 0) {
+                    append_str(asm_out, &asm_idx, "    mov rbx, ");
+                } else {
+                    append_str(asm_out, &asm_idx, "    lea rbx, ");
+                }
+                append_var_ref(asm_out, &asm_idx, var_tok.text);
+                append_str(asm_out, &asm_idx, "\n    add rax, rbx\n");
+            }
+        } else {
+            src_ptr = saved_amp;
+            append_str(asm_out, &asm_idx, "    lea rax, ");
+            append_var_ref(asm_out, &asm_idx, var_tok.text);
+            append_str(asm_out, &asm_idx, "\n");
+        }
     } else if (t.type == TOKEN_STAR) {
         int star_count = 1;
         Token next = get_next_token();
@@ -535,30 +864,6 @@ void parse_term() {
     }
 }
 
-/*
-void parse_expr() {
-    parse_term();
-    while (1) {
-        const char* saved_ptr = src_ptr;
-        Token op = get_next_token();
-        if (op.type == TOKEN_PLUS || op.type == TOKEN_MINUS) {
-            append_str(asm_out, &asm_idx, "    push rax\n");
-            parse_term();
-            append_str(asm_out, &asm_idx, "    mov rbx, rax\n");
-            append_str(asm_out, &asm_idx, "    pop rax\n");
-            if (op.type == TOKEN_PLUS) {
-                append_str(asm_out, &asm_idx, "    add rax, rbx\n");
-            } else if (op.type == TOKEN_MINUS) {
-                append_str(asm_out, &asm_idx, "    sub rax, rbx\n");
-            }
-        } else {
-            src_ptr = saved_ptr;
-            break;
-        }
-    }
-}
-*/
-
 int is_float_ahead() {
     const char* saved = src_ptr;
     Token t = get_next_token();
@@ -571,7 +876,25 @@ int is_float_ahead() {
     } else if (t.type == TOKEN_IDENTIFIER) {
         Token next = get_next_token();
         if (next.type == TOKEN_LBRACKET) {
-            if (is_var_base_float(t.text)) res = 1;
+            Variable* v = find_var(t.text);
+            if (v && v->is_struct) {
+                int depth = 1;
+                while (depth > 0) {
+                    Token sk = get_next_token();
+                    if (sk.type == TOKEN_LBRACKET) depth++;
+                    else if (sk.type == TOKEN_RBRACKET) depth--;
+                    else if (sk.type == TOKEN_EOF) break;
+                }
+                StructField* sf = peek_member_from_struct(find_struct(v->struct_type));
+                if (sf && sf->is_float && sf->pointer_level == 0) res = 1;
+            } else if (is_var_base_float(t.text)) {
+                res = 1;
+            }
+        } else if (next.type == TOKEN_DOT || next.type == TOKEN_ARROW) {
+            src_ptr = saved;
+            get_next_token(); // consumă identificatorul
+            StructField* sf = peek_member_field(t.text);
+            if (sf && sf->is_float && sf->pointer_level == 0) res = 1;
         } else if (next.type == TOKEN_LPAREN) {
             FuncInfo* fn = find_func(t.text);
             if (fn && fn->return_is_float) res = 1;
@@ -825,18 +1148,6 @@ void str_cpy(char* dest, const char* src) {
     dest[i] = '\0';
 }
 
-/*
-const char* get_inverse_jump(TokenType op) {
-    if (op == TOKEN_EQ) return "jne"; 
-    if (op == TOKEN_NE) return "je";  
-    if (op == TOKEN_GT) return "jle"; 
-    if (op == TOKEN_LT) return "jge"; 
-    if (op == TOKEN_GE) return "jl";  
-    if (op == TOKEN_LE) return "jg";  
-    return "jne"; 
-}
-*/
-
 const char* get_direct_jump(TokenType op) {
     if (op == TOKEN_EQ) return "je";
     if (op == TOKEN_NE) return "jne";
@@ -847,18 +1158,6 @@ const char* get_direct_jump(TokenType op) {
     return "je";
 }
 
-/*
-const char* get_inverse_jump_float(TokenType op) {
-    if (op == TOKEN_EQ) return "jne"; 
-    if (op == TOKEN_NE) return "je";  
-    if (op == TOKEN_GT) return "jbe"; 
-    if (op == TOKEN_LT) return "jae"; 
-    if (op == TOKEN_GE) return "jb";  
-    if (op == TOKEN_LE) return "ja";  
-    return "jne"; 
-}
-*/
-
 const char* get_direct_jump_float(TokenType op) {
     if (op == TOKEN_EQ) return "je";
     if (op == TOKEN_NE) return "jne";
@@ -868,73 +1167,6 @@ const char* get_direct_jump_float(TokenType op) {
     if (op == TOKEN_LE) return "jbe"; 
     return "je";
 }
-
-/*
-void emit_condition_eval(Token var1_tok, Token op_tok, Token val2_tok, 
-                         const char* target_label, int jump_on_true, int is_negated) {
-    int is_float = is_var_float(var1_tok.text);
-
-    if (is_float) {
-        append_str(asm_out, &asm_idx, "    movss xmm0, ");
-        append_var_ref(asm_out, &asm_idx, var1_tok.text);
-        append_str(asm_out, &asm_idx, "\n");
-
-        if (val2_tok.type == TOKEN_NUMBER || val2_tok.type == TOKEN_FLOAT_NUMBER) {
-            uint32_t u = float_to_u32(val2_tok.text);
-            register_global_variable("tmp_float", 1, 0, 0, 0);
-            append_str(asm_out, &asm_idx, "    mov rax, ");
-            append_int(asm_out, &asm_idx, (int)u);
-            append_str(asm_out, &asm_idx, "\n    mov [var_tmp_float], rax\n");
-            append_str(asm_out, &asm_idx, "    movss xmm1, [var_tmp_float]\n");
-        } else if (val2_tok.type == TOKEN_IDENTIFIER) {
-            append_str(asm_out, &asm_idx, "    movss xmm1, ");
-            append_var_ref(asm_out, &asm_idx, val2_tok.text);
-            append_str(asm_out, &asm_idx, "\n");
-        } else {
-            register_global_variable("tmp_float", 1, 0, 0, 0);
-            append_str(asm_out, &asm_idx, "    mov rax, 0\n    mov [var_tmp_float], rax\n");
-            append_str(asm_out, &asm_idx, "    movss xmm1, [var_tmp_float]\n");
-        }
-        append_str(asm_out, &asm_idx, "    ucomiss xmm0, xmm1\n");
-    } else {
-        append_str(asm_out, &asm_idx, "    mov rdi, ");
-        append_var_ref(asm_out, &asm_idx, var1_tok.text);
-        append_str(asm_out, &asm_idx, "\n");
-
-        if (val2_tok.type == TOKEN_NUMBER || val2_tok.type == TOKEN_FLOAT_NUMBER) {
-            append_str(asm_out, &asm_idx, "    cmp rdi, ");
-            append_str(asm_out, &asm_idx, val2_tok.text);
-            append_str(asm_out, &asm_idx, "\n");
-        } else if (val2_tok.type == TOKEN_IDENTIFIER) {
-            append_str(asm_out, &asm_idx, "    mov rax, ");
-            append_var_ref(asm_out, &asm_idx, val2_tok.text);
-            append_str(asm_out, &asm_idx, "\n    cmp rdi, rax\n");
-        } else {
-            append_str(asm_out, &asm_idx, "    cmp rdi, 0\n");
-        }
-    }
-
-    const char* jump_instr = NULL;
-    if (op_tok.type == TOKEN_ASSIGN || op_tok.type == TOKEN_RPAREN) {
-        jump_instr = (is_negated ^ jump_on_true) ? "jne" : "je";
-    } else {
-        if (is_float) {
-            jump_instr = (is_negated ^ jump_on_true) ? get_direct_jump_float(op_tok.type) 
-                                                     : get_inverse_jump_float(op_tok.type);
-        } else {
-            jump_instr = (is_negated ^ jump_on_true) ? get_direct_jump(op_tok.type) 
-                                                     : get_inverse_jump(op_tok.type);
-        }
-    }
-
-    append_str(asm_out, &asm_idx, "    ");
-    append_str(asm_out, &asm_idx, jump_instr);
-    append_str(asm_out, &asm_idx, " ");
-    append_str(asm_out, &asm_idx, target_label);
-    append_str(asm_out, &asm_idx, "\n");
-}
-*/
-
 
 Token get_next_token() {
     Token token;
@@ -998,6 +1230,7 @@ Token get_next_token() {
 		else if (str_eq(token.text, "break")) token.type = TOKEN_BREAK_KW;
         else if (str_eq(token.text, "continue")) token.type = TOKEN_CONTINUE_KW;
         else if (str_eq(token.text, "return")) token.type = TOKEN_RETURN_KW;
+		else if (str_eq(token.text, "struct")) token.type = TOKEN_STRUCT_KW;
         else token.type = TOKEN_IDENTIFIER;
         return token;
     }
@@ -1054,8 +1287,10 @@ Token get_next_token() {
             break;
         case '-': 
             if (*src_ptr == '-') { src_ptr++; token.type = TOKEN_DEC; str_cpy(token.text, "--"); }
+            else if (*src_ptr == '>') { src_ptr++; token.type = TOKEN_ARROW; str_cpy(token.text, "->"); }
             else { token.type = TOKEN_MINUS; }
             break;
+        case '.': token.type = TOKEN_DOT; str_cpy(token.text, "."); break;
         case '&':
             if (*src_ptr == '&') { src_ptr++; token.type = TOKEN_AND; str_cpy(token.text, "&&"); }
             else { token.type = TOKEN_AMPERSAND; str_cpy(token.text, "&"); }
@@ -1108,13 +1343,13 @@ void parse_statement_token(Token t) {
         Token next_tok = get_next_token();
         int is_ptr = 0;
         int ptr_level = 0;
-        
+
         while (next_tok.type == TOKEN_STAR) {
             is_ptr = 1;
             ptr_level++;
             next_tok = get_next_token();
         }
-        
+
         Token var_tok = next_tok;
         Token op_or_semi = get_next_token();
 
@@ -1123,7 +1358,7 @@ void parse_statement_token(Token t) {
             int array_sz = atoi(size_tok.text);
             get_next_token();
             consume_semicolon();
-            
+
             register_array(var_tok.text, is_float, is_char, array_sz);
         }
         else {
@@ -1145,62 +1380,171 @@ void parse_statement_token(Token t) {
             }
         }
     }
+    else if (t.type == TOKEN_STRUCT_KW) {
+        Token st_tok = get_next_token();
+        Token next_tok = get_next_token();
+
+        if (next_tok.type == TOKEN_LBRACE) {
+            parse_struct_definition(st_tok.text);
+        } else {
+            int is_ptr = 0, ptr_level = 0;
+            while (next_tok.type == TOKEN_STAR) {
+                is_ptr = 1;
+                ptr_level++;
+                next_tok = get_next_token();
+            }
+            Token var_tok = next_tok;
+            Token op_or_semi = get_next_token();
+
+            if (op_or_semi.type == TOKEN_LBRACKET) {
+                Token size_tok = get_next_token();
+                int array_sz = atoi(size_tok.text);
+                get_next_token(); // consumă ']'
+                consume_semicolon();
+                register_struct_array(var_tok.text, st_tok.text, is_ptr, ptr_level, array_sz);
+            } else {
+                register_struct_var(var_tok.text, st_tok.text, is_ptr, ptr_level);
+                if (op_or_semi.type == TOKEN_ASSIGN) {
+                    parse_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    mov ");
+                    append_var_ref(asm_out, &asm_idx, var_tok.text);
+                    append_str(asm_out, &asm_idx, ", rax\n");
+                }
+            }
+        }
+    }
     else if (t.type == TOKEN_IDENTIFIER) {
         Token var_tok = t;
         Token next_tok = get_next_token();
-        
+
         if (next_tok.type == TOKEN_LBRACKET) {
-            parse_expr();
-            get_next_token();
-            
-            if (is_var_str_ptr(var_tok.text) || is_var_base_char(var_tok.text)) {
-                if (is_var_str_ptr(var_tok.text)) {
-                    append_str(asm_out, &asm_idx, "    mov rbx, ");
-                    append_var_ref(asm_out, &asm_idx, var_tok.text);
-                    append_str(asm_out, &asm_idx, "\n");
-                } else {
-                    append_str(asm_out, &asm_idx, "    lea rbx, ");
-                    append_var_ref(asm_out, &asm_idx, var_tok.text);
-                    append_str(asm_out, &asm_idx, "\n");
+            Variable* v = find_var(var_tok.text);
+            if (v && v->is_struct) {
+                emit_struct_array_elem_addr(v);
+                Token member_op = get_next_token();
+
+                if (member_op.type == TOKEN_DOT || member_op.type == TOKEN_ARROW) {
+                    StructField* sf = resolve_member_from_base(find_struct(v->struct_type), member_op);
+                    append_str(asm_out, &asm_idx, "    push rax\n");
+
+                    Token assign_tok = get_next_token();
+                    if (assign_tok.type == TOKEN_ASSIGN) {
+                        if (sf && sf->is_float && sf->pointer_level == 0) {
+                            parse_float_expr();
+                            consume_semicolon();
+                            append_str(asm_out, &asm_idx, "    pop rbx\n");
+                            append_str(asm_out, &asm_idx, "    movss [rbx], xmm0\n");
+                        } else if (sf && sf->is_char && sf->pointer_level == 0) {
+                            parse_expr();
+                            consume_semicolon();
+                            append_str(asm_out, &asm_idx, "    pop rbx\n");
+                            append_str(asm_out, &asm_idx, "    mov [rbx], al\n");
+                        } else {
+                            parse_expr();
+                            consume_semicolon();
+                            append_str(asm_out, &asm_idx, "    pop rbx\n");
+                            append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
+                        }
+                    } else if (assign_tok.type == TOKEN_INC || assign_tok.type == TOKEN_DEC) {
+                        consume_semicolon();
+                        append_str(asm_out, &asm_idx, "    pop rbx\n");
+                        append_str(asm_out, &asm_idx, "    mov rax, [rbx]\n");
+                        if (assign_tok.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
+                        else append_str(asm_out, &asm_idx, "    dec rax\n");
+                        append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
+                    }
+                } else if (member_op.type == TOKEN_ASSIGN) {
+                    // Cazul array de pointeri la struct: ptrs[i] = &node;
+                    append_str(asm_out, &asm_idx, "    push rax\n");
+                    parse_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    pop rbx\n");
+                    append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
                 }
-                append_str(asm_out, &asm_idx, "    add rbx, rax\n");
-                append_str(asm_out, &asm_idx, "    push rbx\n");
-                
-                Token assign_tok = get_next_token();
-                if (assign_tok.type == TOKEN_ASSIGN) {
+            } else {
+                parse_expr();
+                get_next_token();
+
+                if (is_var_str_ptr(var_tok.text) || is_var_base_char(var_tok.text)) {
+                    if (is_var_str_ptr(var_tok.text)) {
+                        append_str(asm_out, &asm_idx, "    mov rbx, ");
+                        append_var_ref(asm_out, &asm_idx, var_tok.text);
+                        append_str(asm_out, &asm_idx, "\n");
+                    } else {
+                        append_str(asm_out, &asm_idx, "    lea rbx, ");
+                        append_var_ref(asm_out, &asm_idx, var_tok.text);
+                        append_str(asm_out, &asm_idx, "\n");
+                    }
+                    append_str(asm_out, &asm_idx, "    add rbx, rax\n");
+                    append_str(asm_out, &asm_idx, "    push rbx\n");
+
+                    Token assign_tok = get_next_token();
+                    if (assign_tok.type == TOKEN_ASSIGN) {
+                        parse_expr();
+                        consume_semicolon();
+                        append_str(asm_out, &asm_idx, "    pop rbx\n");
+                        append_str(asm_out, &asm_idx, "    mov [rbx], al\n");
+                    }
+                } else {
+                    append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
+                    append_str(asm_out, &asm_idx, "    imul rbx\n");
+                    if (get_var_pointer_level(t.text) > 0) {
+                        append_str(asm_out, &asm_idx, "    mov rbx, ");
+                    } else {
+                        append_str(asm_out, &asm_idx, "    lea rbx, ");
+                    }
+                    append_var_ref(asm_out, &asm_idx, var_tok.text);
+                    append_str(asm_out, &asm_idx, "\n");
+                    append_str(asm_out, &asm_idx, "    add rax, rbx\n");
+                    append_str(asm_out, &asm_idx, "    push rax\n");
+
+                    Token assign_tok = get_next_token();
+                    if (assign_tok.type == TOKEN_ASSIGN) {
+                        if (is_var_base_float(var_tok.text)) {
+                            parse_float_expr();
+                            consume_semicolon();
+                            append_str(asm_out, &asm_idx, "    pop rbx\n");
+                            append_str(asm_out, &asm_idx, "    movss [rbx], xmm0\n");
+                        } else {
+                            parse_expr();
+                            consume_semicolon();
+                            append_str(asm_out, &asm_idx, "    pop rbx\n");
+                            append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
+                        }
+                    }
+                }
+            }
+        }
+        else if (next_tok.type == TOKEN_DOT || next_tok.type == TOKEN_ARROW) {
+            StructField* sf = resolve_member_address(var_tok.text, next_tok);
+            append_str(asm_out, &asm_idx, "    push rax\n");
+
+            Token assign_tok = get_next_token();
+            if (assign_tok.type == TOKEN_ASSIGN) {
+                if (sf && sf->is_float && sf->pointer_level == 0) {
+                    parse_float_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    pop rbx\n");
+                    append_str(asm_out, &asm_idx, "    movss [rbx], xmm0\n");
+                } else if (sf && sf->is_char && sf->pointer_level == 0) {
                     parse_expr();
                     consume_semicolon();
                     append_str(asm_out, &asm_idx, "    pop rbx\n");
                     append_str(asm_out, &asm_idx, "    mov [rbx], al\n");
-                }
-            } else {
-                append_str(asm_out, &asm_idx, "    mov rbx, 8\n");
-                append_str(asm_out, &asm_idx, "    imul rbx\n");
-                //append_str(asm_out, &asm_idx, "    lea rbx, ");
-				if (get_var_pointer_level(t.text) > 0) {
-                    append_str(asm_out, &asm_idx, "    mov rbx, ");
                 } else {
-                    append_str(asm_out, &asm_idx, "    lea rbx, ");
+                    parse_expr();
+                    consume_semicolon();
+                    append_str(asm_out, &asm_idx, "    pop rbx\n");
+                    append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
                 }
-                append_var_ref(asm_out, &asm_idx, var_tok.text);
-                append_str(asm_out, &asm_idx, "\n");
-                append_str(asm_out, &asm_idx, "    add rax, rbx\n");
-                append_str(asm_out, &asm_idx, "    push rax\n");
-                
-                Token assign_tok = get_next_token();
-                if (assign_tok.type == TOKEN_ASSIGN) {
-                    if (is_var_base_float(var_tok.text)) {
-                        parse_float_expr();
-                        consume_semicolon();
-                        append_str(asm_out, &asm_idx, "    pop rbx\n");
-                        append_str(asm_out, &asm_idx, "    movss [rbx], xmm0\n");
-                    } else {
-                        parse_expr();
-                        consume_semicolon();
-                        append_str(asm_out, &asm_idx, "    pop rbx\n");
-                        append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
-                    }
-                }
+            } else if (assign_tok.type == TOKEN_INC || assign_tok.type == TOKEN_DEC) {
+                consume_semicolon();
+                append_str(asm_out, &asm_idx, "    pop rbx\n");
+                append_str(asm_out, &asm_idx, "    mov rax, [rbx]\n");
+                if (assign_tok.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
+                else append_str(asm_out, &asm_idx, "    dec rax\n");
+                append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
             }
         }
         else if (next_tok.type == TOKEN_ASSIGN) {
@@ -1223,10 +1567,10 @@ void parse_statement_token(Token t) {
             append_str(asm_out, &asm_idx, "    mov rax, ");
             append_var_ref(asm_out, &asm_idx, var_tok.text);
             append_str(asm_out, &asm_idx, "\n");
-            
+
             if (next_tok.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
             else append_str(asm_out, &asm_idx, "    dec rax\n");
-            
+
             append_str(asm_out, &asm_idx, "    mov ");
             append_var_ref(asm_out, &asm_idx, var_tok.text);
             append_str(asm_out, &asm_idx, ", rax\n");
@@ -1245,18 +1589,18 @@ void parse_statement_token(Token t) {
         }
         Token ptr_tok = next_tok;
         Token assign_tok = get_next_token();
-        
+
         if (assign_tok.type == TOKEN_ASSIGN) {
             int is_target_float = is_var_base_float(ptr_tok.text) && (get_var_pointer_level(ptr_tok.text) == star_count);
 
             if (is_target_float) {
                 parse_float_expr();
                 consume_semicolon();
-                
+
                 append_str(asm_out, &asm_idx, "    mov rax, ");
                 append_var_ref(asm_out, &asm_idx, ptr_tok.text);
                 append_str(asm_out, &asm_idx, "\n");
-                
+
                 for (int i = 0; i < star_count - 1; i++) {
                     append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
                 }
@@ -1264,16 +1608,16 @@ void parse_statement_token(Token t) {
             } else {
                 parse_expr();
                 consume_semicolon();
-                
+
                 append_str(asm_out, &asm_idx, "    push rax\n");
                 append_str(asm_out, &asm_idx, "    mov rbx, ");
                 append_var_ref(asm_out, &asm_idx, ptr_tok.text);
                 append_str(asm_out, &asm_idx, "\n");
-                
+
                 for (int i = 0; i < star_count - 1; i++) {
                     append_str(asm_out, &asm_idx, "    mov rbx, [rbx]\n");
                 }
-                
+
                 append_str(asm_out, &asm_idx, "    pop rax\n");
                 append_str(asm_out, &asm_idx, "    mov [rbx], rax\n");
             }
@@ -1291,7 +1635,7 @@ void parse_statement_token(Token t) {
             append_str(asm_out, &asm_idx, "    print \"");
             append_str(asm_out, &asm_idx, arg_tok.text);
             append_str(asm_out, &asm_idx, "\"\n    newline\n");
-        } 
+        }
         else {
             int is_float_expression = 0;
             int is_char_expression = 0;
@@ -1303,35 +1647,51 @@ void parse_statement_token(Token t) {
 
             if (arg_tok.type == TOKEN_CHAR_LITERAL) {
                 is_char_expression = 1;
-            } 
+            }
             else if (arg_tok.type == TOKEN_IDENTIFIER && peek_next.type == TOKEN_LBRACKET) {
-                if (is_var_str_ptr(arg_tok.text) || is_var_base_char(arg_tok.text)) {
+                Variable* v = find_var(arg_tok.text);
+                if (v && v->is_struct) {
+                    get_next_token(); // consumă '['
+                    int depth = 1;
+                    while (depth > 0) {
+                        Token sk = get_next_token();
+                        if (sk.type == TOKEN_LBRACKET) depth++;
+                        else if (sk.type == TOKEN_RBRACKET) depth--;
+                        else if (sk.type == TOKEN_EOF) break;
+                    }
+                    StructField* sf = peek_member_from_struct(find_struct(v->struct_type));
+                    if (sf && sf->is_float && sf->pointer_level == 0) is_float_expression = 1;
+                    else if (sf && sf->is_char && sf->pointer_level == 0) is_char_expression = 1;
+                    else if (sf && sf->is_char && sf->pointer_level == 1) is_str_ptr_expression = 1;
+                } else if (is_var_str_ptr(arg_tok.text) || is_var_base_char(arg_tok.text)) {
                     is_char_expression = 1;
                 } else if (is_var_base_float(arg_tok.text)) {
                     is_float_expression = 1;
                 }
-            } 
+            }
             else if (arg_tok.type == TOKEN_IDENTIFIER && peek_next.type == TOKEN_LPAREN) {
                 FuncInfo* fn = find_func(arg_tok.text);
                 if (fn && fn->return_is_float) is_float_expression = 1;
                 else if (fn && fn->return_is_char && fn->return_is_ptr) is_str_ptr_expression = 1;
             }
-			else if (arg_tok.type == TOKEN_IDENTIFIER && 
+            else if (arg_tok.type == TOKEN_IDENTIFIER &&
                     (is_var_str_ptr(arg_tok.text) || (is_var_array(arg_tok.text) && is_var_base_char(arg_tok.text)))) {
                 is_str_ptr_expression = 1;
-            }	
-            //else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_str_ptr(arg_tok.text)) {
-              //  is_str_ptr_expression = 1;
-            //} 
+            }
             else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_char(arg_tok.text)) {
                 is_char_expression = 1;
             }
-					
             else if (arg_tok.type == TOKEN_FLOAT_NUMBER) {
                 is_float_expression = 1;
-            } 
+            }
             else if (arg_tok.type == TOKEN_IDENTIFIER && is_var_float(arg_tok.text)) {
                 is_float_expression = 1;
+            }
+            else if (arg_tok.type == TOKEN_IDENTIFIER && (peek_next.type == TOKEN_DOT || peek_next.type == TOKEN_ARROW)) {
+                StructField* sf = peek_member_field(arg_tok.text);
+                if (sf && sf->is_float && sf->pointer_level == 0) is_float_expression = 1;
+                else if (sf && sf->is_char && sf->pointer_level == 0) is_char_expression = 1;
+                else if (sf && sf->is_char && sf->pointer_level == 1) is_str_ptr_expression = 1;
             }
 
             src_ptr = saved_ptr;
@@ -1361,7 +1721,7 @@ void parse_statement_token(Token t) {
     }
     else if (t.type == TOKEN_IF_KW) {
         get_next_token(); // '('
-        
+
         int current_if = if_counter++;
         char else_label[32], end_label[32];
         strcpy(else_label, "else_body_"); itoa(current_if, else_label + strlen(else_label), 10);
@@ -1387,7 +1747,7 @@ void parse_statement_token(Token t) {
 
         const char* saved_ptr = src_ptr;
         Token else_check = get_next_token();
-        
+
         if (else_check.type == TOKEN_ELSE_KW) {
             Token else_body = get_next_token();
             parse_statement_token(else_body);
@@ -1400,15 +1760,15 @@ void parse_statement_token(Token t) {
     }
     else if (t.type == TOKEN_WHILE_KW) {
         get_next_token(); // '('
-        
-        int current_while = if_counter++; 
+
+        int current_while = if_counter++;
         char cond_label[32], end_label[32];
         strcpy(cond_label, "while_cond_"); itoa(current_while, cond_label + strlen(cond_label), 10);
         strcpy(end_label, "while_end_"); itoa(current_while, end_label + strlen(end_label), 10);
-        
+
         append_str(asm_out, &asm_idx, cond_label);
         append_str(asm_out, &asm_idx, ":\n");
-        
+
         parse_expr();
         get_next_token(); // ')'
 
@@ -1420,16 +1780,16 @@ void parse_statement_token(Token t) {
         strcpy(loop_stack[loop_depth].break_label, end_label);
         strcpy(loop_stack[loop_depth].continue_label, cond_label);
         loop_depth++;
-        
+
         Token body_tok = get_next_token();
         parse_statement_token(body_tok);
 
         loop_depth--;
-        
+
         append_str(asm_out, &asm_idx, "    jmp ");
         append_str(asm_out, &asm_idx, cond_label);
         append_str(asm_out, &asm_idx, "\n");
-        
+
         append_str(asm_out, &asm_idx, end_label);
         append_str(asm_out, &asm_idx, ":\n");
     }
@@ -1441,15 +1801,15 @@ void parse_statement_token(Token t) {
             parse_statement_token(init_tok);
         }
 
-        int current_for = if_counter++; 
+        int current_for = if_counter++;
         char cond_label[32], step_label[32], end_label[32];
         strcpy(cond_label, "for_cond_"); itoa(current_for, cond_label + strlen(cond_label), 10);
         strcpy(step_label, "for_step_"); itoa(current_for, step_label + strlen(step_label), 10);
         strcpy(end_label, "for_end_"); itoa(current_for, end_label + strlen(end_label), 10);
-        
+
         append_str(asm_out, &asm_idx, cond_label);
         append_str(asm_out, &asm_idx, ":\n");
-        
+
         const char* cond_check_ptr = src_ptr;
         Token cond_peek = get_next_token();
         if (cond_peek.type != TOKEN_SEMICOLON) {
@@ -1461,10 +1821,10 @@ void parse_statement_token(Token t) {
             append_str(asm_out, &asm_idx, end_label);
             append_str(asm_out, &asm_idx, "\n");
         }
-        
-        const char* increment_ptr = src_ptr; 
-        
-        int paren_count = 1; 
+
+        const char* increment_ptr = src_ptr;
+
+        int paren_count = 1;
         while (paren_count > 0) {
             Token skip = get_next_token();
             if (skip.type == TOKEN_LPAREN) paren_count++;
@@ -1475,14 +1835,14 @@ void parse_statement_token(Token t) {
         strcpy(loop_stack[loop_depth].break_label, end_label);
         strcpy(loop_stack[loop_depth].continue_label, step_label);
         loop_depth++;
-        
+
         Token body_tok = get_next_token();
         parse_statement_token(body_tok);
 
         loop_depth--;
-        
-        const char* after_body_ptr = src_ptr; 
-        src_ptr = increment_ptr;              
+
+        const char* after_body_ptr = src_ptr;
+        src_ptr = increment_ptr;
 
         append_str(asm_out, &asm_idx, step_label);
         append_str(asm_out, &asm_idx, ":\n");
@@ -1495,10 +1855,10 @@ void parse_statement_token(Token t) {
                 append_str(asm_out, &asm_idx, "    mov rax, ");
                 append_var_ref(asm_out, &asm_idx, tok2.text);
                 append_str(asm_out, &asm_idx, "\n");
-                
+
                 if (tok1.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
                 else append_str(asm_out, &asm_idx, "    dec rax\n");
-                
+
                 append_str(asm_out, &asm_idx, "    mov ");
                 append_var_ref(asm_out, &asm_idx, tok2.text);
                 append_str(asm_out, &asm_idx, ", rax\n");
@@ -1507,22 +1867,22 @@ void parse_statement_token(Token t) {
                 append_str(asm_out, &asm_idx, "    mov rax, ");
                 append_var_ref(asm_out, &asm_idx, tok1.text);
                 append_str(asm_out, &asm_idx, "\n");
-                
+
                 if (tok2.type == TOKEN_INC) append_str(asm_out, &asm_idx, "    inc rax\n");
                 else append_str(asm_out, &asm_idx, "    dec rax\n");
-                
+
                 append_str(asm_out, &asm_idx, "    mov ");
                 append_var_ref(asm_out, &asm_idx, tok1.text);
                 append_str(asm_out, &asm_idx, ", rax\n");
             }
             else if (tok2.type == TOKEN_ASSIGN) {
                 if (is_var_float(tok1.text)) {
-                    parse_float_expr(); 
+                    parse_float_expr();
                     append_str(asm_out, &asm_idx, "    movss ");
                     append_var_ref(asm_out, &asm_idx, tok1.text);
                     append_str(asm_out, &asm_idx, ", xmm0\n");
                 } else {
-                    parse_expr(); 
+                    parse_expr();
                     append_str(asm_out, &asm_idx, "    mov ");
                     append_var_ref(asm_out, &asm_idx, tok1.text);
                     append_str(asm_out, &asm_idx, ", rax\n");
@@ -1535,7 +1895,7 @@ void parse_statement_token(Token t) {
         append_str(asm_out, &asm_idx, "    jmp ");
         append_str(asm_out, &asm_idx, cond_label);
         append_str(asm_out, &asm_idx, "\n");
-        
+
         append_str(asm_out, &asm_idx, end_label);
         append_str(asm_out, &asm_idx, ":\n");
     }
@@ -1659,7 +2019,6 @@ void emit_function_call(const char* func_name) {
     append_str(asm_out, &asm_idx, func_name);
     append_str(asm_out, &asm_idx, "\n");
 }
-
 int main(int argc, char** argv) {
     if (argc < 3) {
         nano_print("Utilizare: cc <sursa.c> <iesire.s>\n");
@@ -1668,8 +2027,8 @@ int main(int argc, char** argv) {
 
     nano_print("[nanoc] Compilator C nativ pornit pe host...\n");
 
-    uint8_t src_buffer[8192];
-    int bytes_read = nano_read_file(argv[1], src_buffer, 8191);
+    uint8_t src_buffer[32768];
+    int bytes_read = nano_read_file(argv[1], src_buffer, 32767);
     if (bytes_read <= 0) {
         nano_print("[nanoc] Eroare la citirea sursei C!\n");
         return 1;
@@ -1687,18 +2046,39 @@ int main(int argc, char** argv) {
 
     Token t = get_next_token();
     while (t.type != TOKEN_EOF) {
-        if (t.type == TOKEN_INT_KW || t.type == TOKEN_FLOAT_KW || t.type == TOKEN_CHAR_KW || t.type == TOKEN_VOID_KW) {
-            int ret_is_void  = (t.type == TOKEN_VOID_KW);
-            int ret_is_float = (t.type == TOKEN_FLOAT_KW);
-            int ret_is_char  = (t.type == TOKEN_CHAR_KW);
-            int ret_is_ptr   = 0;
-			int ptr_level    = 0;
+        // 1. Dacă este definiție de structură (struct Nume { ... };), o parsăm și trecem mai departe.
+        //    Dacă nu urmează '{' (ex: struct Node* func(...) sau struct Point g;), derulăm și intrăm în blocul comun.
+        if (t.type == TOKEN_STRUCT_KW) {
+            const char* peek_st = src_ptr;
+            Token st_tok = get_next_token();
+            Token after_st = get_next_token();
+            if (after_st.type == TOKEN_LBRACE) {
+                parse_struct_definition(st_tok.text);
+                t = get_next_token();
+                continue;
+            }
+            src_ptr = peek_st;
+        }
+
+        if (t.type == TOKEN_INT_KW || t.type == TOKEN_FLOAT_KW || t.type == TOKEN_CHAR_KW || t.type == TOKEN_VOID_KW || t.type == TOKEN_STRUCT_KW) {
+            int ret_is_void   = (t.type == TOKEN_VOID_KW);
+            int ret_is_float  = (t.type == TOKEN_FLOAT_KW);
+            int ret_is_char   = (t.type == TOKEN_CHAR_KW);
+            int ret_is_struct = (t.type == TOKEN_STRUCT_KW);
+            int ret_is_ptr    = 0;
+            int ptr_level     = 0;
+            char ret_struct_type[32] = "";
+
+            if (ret_is_struct) {
+                Token st_tok = get_next_token();
+                strcpy(ret_struct_type, st_tok.text);
+            }
 
             Token name_tok = get_next_token();
             while (name_tok.type == TOKEN_STAR) {
                 ret_is_ptr = 1;
                 ret_is_void = 0;
-				ptr_level++;
+                ptr_level++;
                 name_tok = get_next_token();
             }
 
@@ -1759,11 +2139,51 @@ int main(int argc, char** argv) {
                             p_next = get_next_token();
                         }
 
+                        const char* after_pname = src_ptr;
+                        Token arr_chk = get_next_token();
+                        if (arr_chk.type == TOKEN_LBRACKET) {
+                            get_next_token(); // consumă ']'
+                            p_ptr = 1;
+                            p_lvl = 1;
+                        } else {
+                            src_ptr = after_pname;
+                        }
+
                         strcpy(temp_params[param_count], p_next.text);
                         param_is_float[param_count] = p_float;
                         fn->param_is_float[param_count] = p_float;
 
                         register_variable(p_next.text, p_float, p_ptr, p_lvl, p_char);
+                        param_count++;
+                    }
+                    else if (p.type == TOKEN_STRUCT_KW) {
+                        Token st_tok = get_next_token();
+                        int p_ptr = 0;
+                        int p_lvl = 0;
+
+                        Token p_next = get_next_token();
+                        while (p_next.type == TOKEN_STAR) {
+                            p_ptr = 1;
+                            p_lvl++;
+                            p_next = get_next_token();
+                        }
+
+                        // Suport pentru parametri de forma: struct Node arr[]
+                        const char* after_pname = src_ptr;
+                        Token arr_chk = get_next_token();
+                        if (arr_chk.type == TOKEN_LBRACKET) {
+                            get_next_token(); // consumă ']'
+                            p_ptr = 1;
+                            p_lvl = 1;
+                        } else {
+                            src_ptr = after_pname;
+                        }
+
+                        strcpy(temp_params[param_count], p_next.text);
+                        param_is_float[param_count] = 0;
+                        fn->param_is_float[param_count] = 0;
+
+                        register_struct_var(p_next.text, st_tok.text, p_ptr, p_lvl);
                         param_count++;
                     }
                     p = get_next_token();
@@ -1778,10 +2198,10 @@ int main(int argc, char** argv) {
                     append_str(asm_out, &asm_idx, name_tok.text);
                     append_str(asm_out, &asm_idx, ":\n");
 
-                    // Prolog Stack Frame
+                    // Prolog Stack Frame (1024 octeți pentru a acomoda array-uri locale de structuri)
                     append_str(asm_out, &asm_idx, "    push rbp\n");
                     append_str(asm_out, &asm_idx, "    mov rbp, rsp\n");
-                    append_str(asm_out, &asm_idx, "    sub rsp, 256\n");
+                    append_str(asm_out, &asm_idx, "    sub rsp, 1024\n");
 
                     const char* int_regs[] = {"rdi", "rsi", "rdx", "rcx"};
                     const char* xmm_regs[] = {"xmm0", "xmm1", "xmm2", "xmm3"};
@@ -1822,13 +2242,26 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-			else if (next_tok.type == TOKEN_LBRACKET) {
+            else if (next_tok.type == TOKEN_LBRACKET) {
                 Token size_tok = get_next_token();
                 int array_sz = atoi(size_tok.text);
                 get_next_token(); // Consumă ']'
                 consume_semicolon();
-                register_global_array(name_tok.text, ret_is_float, ret_is_char, array_sz);
-            }else if (next_tok.type == TOKEN_ASSIGN || next_tok.type == TOKEN_SEMICOLON) {
+
+                if (ret_is_struct) {
+                    StructDef* sd = find_struct(ret_struct_type);
+                    int elem_slots = (ptr_level > 0 || !sd) ? 1 : (sd->total_size / 8);
+                    if (elem_slots < 1) elem_slots = 1;
+                    register_global_array(name_tok.text, 0, 0, array_sz * elem_slots);
+                    global_var_table[global_var_count - 1].is_struct = 1;
+                    global_var_table[global_var_count - 1].is_pointer = ret_is_ptr;
+                    global_var_table[global_var_count - 1].pointer_level = ptr_level;
+                    strcpy(global_var_table[global_var_count - 1].struct_type, ret_struct_type);
+                } else {
+                    register_global_array(name_tok.text, ret_is_float, ret_is_char, array_sz);
+                }
+            }
+            else if (next_tok.type == TOKEN_ASSIGN || next_tok.type == TOKEN_SEMICOLON) {
                 int has_init = 0;
                 int init_val = 0;
                 if (next_tok.type == TOKEN_ASSIGN) {
@@ -1849,9 +2282,21 @@ int main(int argc, char** argv) {
                     consume_semicolon();
                 }
                 register_global_variable_init(name_tok.text, ret_is_float, ret_is_ptr, ptr_level, ret_is_char, has_init, init_val);
+
+                if (ret_is_struct && global_var_count > 0) {
+                    global_var_table[global_var_count - 1].is_struct = 1;
+                    strcpy(global_var_table[global_var_count - 1].struct_type, ret_struct_type);
+                    if (ptr_level == 0) {
+                        StructDef* sd = find_struct(ret_struct_type);
+                        if (sd && sd->total_size > 8) {
+                            global_var_table[global_var_count - 1].is_array = 1;
+                            global_var_table[global_var_count - 1].array_size = sd->total_size / 8;
+                        }
+                    }
+                }
             }
         }
-        
+
         t = get_next_token();
     }
 
@@ -1862,19 +2307,19 @@ int main(int argc, char** argv) {
         append_str(asm_out, &asm_idx, ": data ");
         append_int(asm_out, &asm_idx, global_var_table[i].has_init ? global_var_table[i].init_val : 0);
         append_str(asm_out, &asm_idx, "\n");
-        
+
         if (global_var_table[i].is_array) {
             for (int k = 1; k < global_var_table[i].array_size; k++) {
                 append_str(asm_out, &asm_idx, "    data 0\n");
             }
         }
     }
-    
+
     for (int i = 0; i < string_count; i++) {
         append_str(asm_out, &asm_idx, string_table[i].name);
         append_str(asm_out, &asm_idx, ": data \"");
         append_str(asm_out, &asm_idx, string_table[i].value);
-        append_str(asm_out, &asm_idx, "\"\n    data 0\n"); 
+        append_str(asm_out, &asm_idx, "\"\n    data 0\n");
     }
 
     asm_out[asm_idx] = '\0';
