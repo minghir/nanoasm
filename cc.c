@@ -9,7 +9,7 @@ typedef enum {
     TOKEN_LBRACKET, TOKEN_RBRACKET,
     TOKEN_AND, TOKEN_OR, TOKEN_NOT, TOKEN_AMPERSAND, TOKEN_COMMA,
     TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_MOD, TOKEN_INC, TOKEN_DEC, 
-	TOKEN_STRUCT_KW, TOKEN_DOT, TOKEN_ARROW, TOKEN_UNKNOWN
+	TOKEN_STRUCT_KW, TOKEN_DOT, TOKEN_ARROW, TOKEN_SIZEOF_KW, TOKEN_UNKNOWN
 } TokenType;
 
 typedef struct {
@@ -56,7 +56,7 @@ typedef struct {
 char current_function[64] = "";
 
 static const char* src_ptr = 0;
-char asm_out[32768];
+char asm_out[262144];
 int asm_idx = 0;
 
 static int if_counter = 0;
@@ -118,6 +118,9 @@ void parse_term();
 void parse_factor();
 void parse_statement();
 void consume_semicolon();
+
+int eval_sizeof();
+void emit_heap_runtime();
 
 Variable* find_var(const char* name);
 void append_var_ref(char* dest, int* idx, const char* name);
@@ -817,9 +820,27 @@ void parse_factor() {
                 append_str(asm_out, &asm_idx, "    mov rax, [rax]\n");
             }
         }
-    } else if (t.type == TOKEN_LPAREN) {
-        parse_expr();
-        get_next_token();
+    } if (t.type == TOKEN_LPAREN) {
+        const char* peek_cast = src_ptr;
+        Token cast_tok = get_next_token();
+        if (cast_tok.type == TOKEN_INT_KW || cast_tok.type == TOKEN_FLOAT_KW ||
+            cast_tok.type == TOKEN_CHAR_KW || cast_tok.type == TOKEN_VOID_KW ||
+            cast_tok.type == TOKEN_STRUCT_KW) {
+            while (cast_tok.type != TOKEN_RPAREN && cast_tok.type != TOKEN_EOF) {
+                cast_tok = get_next_token();
+            }
+            parse_factor();
+        } else {
+            src_ptr = peek_cast;
+            parse_expr();
+            get_next_token(); // ')'
+        }
+    }
+    else if (t.type == TOKEN_SIZEOF_KW) {
+        int sz = eval_sizeof();
+        append_str(asm_out, &asm_idx, "    mov rax, ");
+        append_int(asm_out, &asm_idx, sz);
+        append_str(asm_out, &asm_idx, "\n");
     } else if (t.type == TOKEN_NOT) {
         parse_factor();
         int lbl = if_counter++;
@@ -911,6 +932,9 @@ int is_float_ahead() {
         if (next.type == TOKEN_IDENTIFIER && is_var_base_float(next.text) && get_var_pointer_level(next.text) == stars) {
             res = 1;
         }
+    }
+	else if (t.type == TOKEN_SIZEOF_KW) {
+        eval_sizeof();
     }
     src_ptr = saved;
     return res;
@@ -1231,6 +1255,7 @@ Token get_next_token() {
         else if (str_eq(token.text, "continue")) token.type = TOKEN_CONTINUE_KW;
         else if (str_eq(token.text, "return")) token.type = TOKEN_RETURN_KW;
 		else if (str_eq(token.text, "struct")) token.type = TOKEN_STRUCT_KW;
+		else if (str_eq(token.text, "sizeof")) token.type = TOKEN_SIZEOF_KW;
         else token.type = TOKEN_IDENTIFIER;
         return token;
     }
@@ -2019,6 +2044,292 @@ void emit_function_call(const char* func_name) {
     append_str(asm_out, &asm_idx, func_name);
     append_str(asm_out, &asm_idx, "\n");
 }
+
+int eval_sizeof() {
+    get_next_token(); // consumă '('
+    Token tok = get_next_token();
+    int size = 8;
+
+    if (tok.type == TOKEN_INT_KW || tok.type == TOKEN_FLOAT_KW || tok.type == TOKEN_CHAR_KW || tok.type == TOKEN_VOID_KW) {
+        int base_sz = (tok.type == TOKEN_CHAR_KW) ? 1 : 8;
+        Token next = get_next_token();
+        if (next.type == TOKEN_STAR) {
+            size = 8;
+            while (next.type == TOKEN_STAR) next = get_next_token();
+        } else {
+            size = base_sz;
+        }
+    }
+    else if (tok.type == TOKEN_STRUCT_KW) {
+        Token st_tok = get_next_token();
+        StructDef* sd = find_struct(st_tok.text);
+        int base_sz = sd ? sd->total_size : 8;
+        Token next = get_next_token();
+        if (next.type == TOKEN_STAR) {
+            size = 8;
+            while (next.type == TOKEN_STAR) next = get_next_token();
+        } else {
+            size = base_sz;
+        }
+    }
+    else if (tok.type == TOKEN_IDENTIFIER) {
+        Variable* v = find_var(tok.text);
+        Token next = get_next_token();
+
+        if (next.type == TOKEN_LBRACKET) {
+            int depth = 1;
+            while (depth > 0) {
+                Token sk = get_next_token();
+                if (sk.type == TOKEN_LBRACKET) depth++;
+                else if (sk.type == TOKEN_RBRACKET) depth--;
+                else if (sk.type == TOKEN_EOF) break;
+            }
+            const char* after_idx = src_ptr;
+            Token after_br = get_next_token();
+            if (after_br.type == TOKEN_DOT || after_br.type == TOKEN_ARROW) {
+                src_ptr = after_idx;
+                StructDef* sd = (v && v->is_struct) ? find_struct(v->struct_type) : 0;
+                StructField* sf = peek_member_from_struct(sd);
+                if (sf && sf->is_char && sf->pointer_level == 0) size = 1;
+                else size = 8;
+                get_next_token(); // consumă ')'
+            } else {
+                if (v && v->is_struct) {
+                    StructDef* sd = find_struct(v->struct_type);
+                    int elem_is_ptr = (v->is_array && v->pointer_level > 0) || (!v->is_array && v->pointer_level > 1);
+                    size = (elem_is_ptr || !sd) ? 8 : sd->total_size;
+                } else if (v && v->is_char && v->pointer_level == 0) {
+                    size = 1;
+                } else {
+                    size = 8;
+                }
+            }
+        }
+        else if (next.type == TOKEN_DOT || next.type == TOKEN_ARROW) {
+            StructDef* cur_sd = (v && v->is_struct) ? find_struct(v->struct_type) : 0;
+            StructField* sf = 0;
+            Token op = next;
+            while (op.type == TOKEN_DOT || op.type == TOKEN_ARROW) {
+                Token f_tok = get_next_token();
+                sf = cur_sd ? find_struct_field(cur_sd, f_tok.text) : 0;
+                Token nop = get_next_token();
+                if (nop.type == TOKEN_DOT || nop.type == TOKEN_ARROW) {
+                    //cur_sd = (sf && sf->is_struct) ? find_struct(sf->struct_type) : 0;
+					cur_sd = (sf && sf->struct_type[0] != '\0') ? find_struct(sf->struct_type) : 0;
+                    op = nop;
+                } else {
+                    break;
+                }
+            }
+            if (sf && sf->is_char && sf->pointer_level == 0) size = 1;
+            else size = 8;
+        }
+        else {
+            if (v) {
+                if (v->is_array) {
+                    if (v->is_struct) {
+                        StructDef* sd = find_struct(v->struct_type);
+                        int elem_sz = (v->pointer_level > 0 || !sd) ? 8 : sd->total_size;
+                        size = v->array_size * elem_sz;
+                    } else if (v->is_char && v->pointer_level == 0) {
+                        size = v->array_size;
+                    } else {
+                        size = v->array_size * 8;
+                    }
+                } else if (v->is_struct && v->pointer_level == 0) {
+                    StructDef* sd = find_struct(v->struct_type);
+                    size = sd ? sd->total_size : 8;
+                } else if (v->is_char && v->pointer_level == 0) {
+                    size = 1;
+                } else {
+                    size = 8;
+                }
+            }
+        }
+    }
+
+    return size;
+}
+
+void emit_heap_runtime() {
+    // Heap de 2 KB (2048 octeti) cu header de 16 octeti per bloc: [payload_size | is_free]
+    append_str(asm_out, &asm_idx,
+        "malloc:\n"
+        "    push rbp\n"
+        "    mov rbp, rsp\n"
+        "    sub rsp, 64\n"
+        "    mov [rbp-8], rdi\n"
+        "    mov rax, [var_heap_inited]\n"
+        "    cmp rax, 0\n"
+        "    jne _malloc_ready\n"
+        "    mov rax, 1\n"
+        "    mov [var_heap_inited], rax\n"
+        "    lea rax, [var_heap_arena]\n"
+        "    mov rbx, 2032\n"
+        "    mov [rax], rbx\n"
+        "    mov rbx, 8\n"
+        "    add rax, rbx\n"
+        "    mov rbx, 1\n"
+        "    mov [rax], rbx\n"
+        "_malloc_ready:\n"
+        "    mov rax, [rbp-8]\n"
+        "    cmp rax, 0\n"
+        "    jg _malloc_pos\n"
+        "    mov rax, 8\n"
+        "_malloc_pos:\n"
+        "    mov [rbp-8], rax\n"
+        "_malloc_mod8:\n"
+        "    mov rbx, 8\n"
+        "    cmp rax, rbx\n"
+        "    jl _malloc_mod8_done\n"
+        "    sub rax, rbx\n"
+        "    jmp _malloc_mod8\n"
+        "_malloc_mod8_done:\n"
+        "    cmp rax, 0\n"
+        "    je _malloc_aligned\n"
+        "    mov rbx, rax\n"
+        "    mov rax, 8\n"
+        "    sub rax, rbx\n"
+        "    mov rbx, [rbp-8]\n"
+        "    add rax, rbx\n"
+        "    mov [rbp-8], rax\n"
+        "_malloc_aligned:\n"
+        "    lea rax, [var_heap_arena]\n"
+        "    mov [rbp-16], rax\n"
+        "    mov rbx, 2048\n"
+        "    add rax, rbx\n"
+        "    mov [rbp-24], rax\n"
+        "_malloc_loop:\n"
+        "    mov rax, [rbp-16]\n"
+        "    mov rbx, [rbp-24]\n"
+        "    cmp rax, rbx\n"
+        "    jge _malloc_oom\n"
+        "    mov rcx, [rax]\n"
+        "    mov [rbp-32], rcx\n"
+        "    mov rbx, 8\n"
+        "    add rax, rbx\n"
+        "    mov rdx, [rax]\n"
+        "    cmp rdx, 1\n"
+        "    jne _malloc_next\n"
+        "    mov rax, [rbp-32]\n"
+        "    mov rbx, [rbp-8]\n"
+        "    cmp rax, rbx\n"
+        "    jl _malloc_next\n"
+        "    mov rax, [rbp-32]\n"
+        "    mov rbx, [rbp-8]\n"
+        "    sub rax, rbx\n"
+        "    mov rbx, 24\n"
+        "    cmp rax, rbx\n"
+        "    jl _malloc_nosplit\n"
+        "    mov rax, [rbp-32]\n"
+        "    mov rbx, [rbp-8]\n"
+        "    sub rax, rbx\n"
+        "    mov rbx, 16\n"
+        "    sub rax, rbx\n"
+        "    mov rcx, rax\n"
+        "    mov rax, [rbp-16]\n"
+        "    mov rbx, 16\n"
+        "    add rax, rbx\n"
+        "    mov rbx, [rbp-8]\n"
+        "    add rax, rbx\n"
+        "    mov [rax], rcx\n"
+        "    mov rbx, 8\n"
+        "    add rax, rbx\n"
+        "    mov rcx, 1\n"
+        "    mov [rax], rcx\n"
+        "    mov rax, [rbp-16]\n"
+        "    mov rbx, [rbp-8]\n"
+        "    mov [rax], rbx\n"
+        "_malloc_nosplit:\n"
+        "    mov rax, [rbp-16]\n"
+        "    mov rbx, 8\n"
+        "    add rax, rbx\n"
+        "    mov rbx, 0\n"
+        "    mov [rax], rbx\n"
+        "    mov rax, [rbp-16]\n"
+        "    mov rbx, 16\n"
+        "    add rax, rbx\n"
+        "    mov rsp, rbp\n"
+        "    pop rbp\n"
+        "    ret\n"
+        "_malloc_next:\n"
+        "    mov rax, [rbp-16]\n"
+        "    mov rbx, 16\n"
+        "    add rax, rbx\n"
+        "    mov rbx, [rbp-32]\n"
+        "    add rax, rbx\n"
+        "    mov [rbp-16], rax\n"
+        "    jmp _malloc_loop\n"
+        "_malloc_oom:\n"
+        "    mov rax, 0\n"
+        "    mov rsp, rbp\n"
+        "    pop rbp\n"
+        "    ret\n"
+        "free:\n"
+        "    push rbp\n"
+        "    mov rbp, rsp\n"
+        "    sub rsp, 64\n"
+        "    mov rax, rdi\n"
+        "    cmp rax, 0\n"
+        "    je _free_done\n"
+        "    mov rbx, 16\n"
+        "    sub rax, rbx\n"
+        "    mov rbx, 8\n"
+        "    add rax, rbx\n"
+        "    mov rbx, 1\n"
+        "    mov [rax], rbx\n"
+        "    lea rax, [var_heap_arena]\n"
+        "    mov [rbp-8], rax\n"
+        "    mov rbx, 2048\n"
+        "    add rax, rbx\n"
+        "    mov [rbp-16], rax\n"
+        "_free_coalesce_loop:\n"
+        "    mov rax, [rbp-8]\n"
+        "    mov rbx, [rbp-16]\n"
+        "    cmp rax, rbx\n"
+        "    jge _free_done\n"
+        "    mov rcx, [rax]\n"
+        "    mov [rbp-24], rcx\n"
+        "    mov rbx, 16\n"
+        "    add rax, rbx\n"
+        "    mov rbx, rcx\n"
+        "    add rax, rbx\n"
+        "    mov [rbp-32], rax\n"
+        "    mov rbx, [rbp-16]\n"
+        "    cmp rax, rbx\n"
+        "    jge _free_done\n"
+        "    mov rax, [rbp-8]\n"
+        "    mov rbx, 8\n"
+        "    add rax, rbx\n"
+        "    mov rcx, [rax]\n"
+        "    cmp rcx, 1\n"
+        "    jne _free_advance\n"
+        "    mov rax, [rbp-32]\n"
+        "    mov rbx, 8\n"
+        "    add rax, rbx\n"
+        "    mov rcx, [rax]\n"
+        "    cmp rcx, 1\n"
+        "    jne _free_advance\n"
+        "    mov rax, [rbp-32]\n"
+        "    mov rbx, [rax]\n"
+        "    mov rax, [rbp-24]\n"
+        "    add rax, rbx\n"
+        "    mov rbx, 16\n"
+        "    add rax, rbx\n"
+        "    mov rbx, [rbp-8]\n"
+        "    mov [rbx], rax\n"
+        "    jmp _free_coalesce_loop\n"
+        "_free_advance:\n"
+        "    mov rax, [rbp-32]\n"
+        "    mov [rbp-8], rax\n"
+        "    jmp _free_coalesce_loop\n"
+        "_free_done:\n"
+        "    mov rsp, rbp\n"
+        "    pop rbp\n"
+        "    ret\n"
+    );
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         nano_print("Utilizare: cc <sursa.c> <iesire.s>\n");
@@ -2043,6 +2354,32 @@ int main(int argc, char** argv) {
     }
 
     append_str(asm_out, &asm_idx, "    jmp main\n");
+	
+	// Înregistrăm malloc și free în tabela de funcții
+    strcpy(func_table[func_count].name, "malloc");
+    func_table[func_count].return_is_void = 0;
+    func_table[func_count].return_is_float = 0;
+    func_table[func_count].return_is_char = 0;
+    func_table[func_count].return_is_ptr = 1;
+    func_table[func_count].param_count = 1;
+    func_table[func_count].param_is_float[0] = 0;
+    func_count++;
+
+    strcpy(func_table[func_count].name, "free");
+    func_table[func_count].return_is_void = 1;
+    func_table[func_count].return_is_float = 0;
+    func_table[func_count].return_is_char = 0;
+    func_table[func_count].return_is_ptr = 0;
+    func_table[func_count].param_count = 1;
+    func_table[func_count].param_is_float[0] = 0;
+    func_count++;
+
+    if (strstr((char*)src_buffer, "malloc") || strstr((char*)src_buffer, "free")) {
+        register_global_variable_init("heap_inited", 0, 0, 0, 0, 1, 0);
+        //register_global_array("heap_arena", 0, 0, 8192);
+		register_global_array("heap_arena", 0, 0, 256);
+        emit_heap_runtime();
+    }
 
     Token t = get_next_token();
     while (t.type != TOKEN_EOF) {
