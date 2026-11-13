@@ -1,9 +1,9 @@
 # NanoASM & NanoC
 
-A lightweight, zero-dependency **x86-64 C compiler and two-pass assembler** written entirely from scratch in 
+A lightweight, zero-dependency **x86-64 C compiler and two-pass assembler** written entirely from scratch in C.
 
 ---
-C. Translates C source code directly into x86-64 assembly and emits standalone **Linux ELF64** executables or custom **Nano OS (`NAS1`)** binaries—no GCC, Clang, GAS, or external linkers required in the pipeline.
+Translates C source code directly into x86-64 assembly and emits standalone **Linux ELF64** executables or custom **Nano OS (`NAS1`)** binaries—no GCC, Clang, GAS, or external linkers required in the pipeline.
 
 ## Toolchain Components
 
