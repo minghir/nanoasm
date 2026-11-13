@@ -11,7 +11,7 @@ typedef struct {
 // Structură pentru o instrucțiune parsată
 typedef struct {
     char mnemonic[32];
-    char op1[32];
+    char op1[128];
     char op2[32];
 } Instruction;
 
@@ -44,6 +44,23 @@ int get_reg_code(const char* name) {
     return -1;
 }
 
+
+int parse_rbp_offset(const char* op, int32_t* out_disp) {
+    if (strncmp(op, "[rbp", 4) != 0) return 0;
+    const char* p = op + 4;
+    while (*p == ' ') p++;
+    if (*p == ']') {
+        *out_disp = 0;
+        return 1;
+    }
+    int sign = 1;
+    if (*p == '-') { sign = -1; p++; }
+    else if (*p == '+') { sign = 1; p++; }
+    while (*p == ' ') p++;
+    int val = atoi(p);
+    *out_disp = (int32_t)(sign * val);
+    return 1;
+}
 
 float nano_parse_float(const char* str) {
     float result = 0.0f;
@@ -127,7 +144,8 @@ int parse_instruction(const char* line, Instruction* inst) {
 
     // TRATARE SPECIALĂ PENTRU PRINT
     if (strcmp(inst->mnemonic, "print") == 0) {
-        strcpy(inst->op1, &line[i]);
+        strncpy(inst->op1, &line[i], 127);
+        inst->op1[127] = '\0';
         return 2;
     }
 
@@ -164,6 +182,104 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
     if (len > 0 && inst->mnemonic[len - 1] == ':') {
         return 0;
     }
+
+	// --- SUB RSP, IMM32 (Alocare cadru de stivă) ---
+    if (strcmp(inst->mnemonic, "sub") == 0 && strcmp(inst->op1, "rsp") == 0) {
+        int32_t imm = (int32_t)atoi(inst->op2);
+        if (bin_buffer) {
+            bin_buffer[(*bin_idx)++] = 0x48;
+            bin_buffer[(*bin_idx)++] = 0x81;
+            bin_buffer[(*bin_idx)++] = 0xEC;
+            memcpy(&bin_buffer[*bin_idx], &imm, 4);
+            *bin_idx += 4;
+            nano_print("   [ASM] sub rsp, imm32 -> opcod generat\n");
+        }
+        return 7;
+    }
+
+    // --- MOV REG, [RBP - OFFSET] ---
+    int32_t rbp_disp = 0;
+    if (strcmp(inst->mnemonic, "mov") == 0 && parse_rbp_offset(inst->op2, &rbp_disp)) {
+        int reg = get_reg_code(inst->op1);
+        if (reg != -1) {
+            if (bin_buffer) {
+                bin_buffer[(*bin_idx)++] = 0x48;
+                bin_buffer[(*bin_idx)++] = 0x8B;
+                bin_buffer[(*bin_idx)++] = (uint8_t)(0x85 | (reg << 3));
+                memcpy(&bin_buffer[*bin_idx], &rbp_disp, 4);
+                *bin_idx += 4;
+                nano_print("   [ASM] mov reg, [rbp - off] -> opcod generat\n");
+            }
+            return 7;
+        }
+    }
+
+    // --- MOV [RBP - OFFSET], REG ---
+    if (strcmp(inst->mnemonic, "mov") == 0 && parse_rbp_offset(inst->op1, &rbp_disp)) {
+        int reg = get_reg_code(inst->op2);
+        if (reg != -1) {
+            if (bin_buffer) {
+                bin_buffer[(*bin_idx)++] = 0x48;
+                bin_buffer[(*bin_idx)++] = 0x89;
+                bin_buffer[(*bin_idx)++] = (uint8_t)(0x85 | (reg << 3));
+                memcpy(&bin_buffer[*bin_idx], &rbp_disp, 4);
+                *bin_idx += 4;
+                nano_print("   [ASM] mov [rbp - off], reg -> opcod generat\n");
+            }
+            return 7;
+        }
+    }
+
+    // --- LEA REG, [RBP - OFFSET] (pentru &x și tablouri locale) ---
+    if (strcmp(inst->mnemonic, "lea") == 0 && parse_rbp_offset(inst->op2, &rbp_disp)) {
+        int reg = get_reg_code(inst->op1);
+        if (reg != -1) {
+            if (bin_buffer) {
+                bin_buffer[(*bin_idx)++] = 0x48;
+                bin_buffer[(*bin_idx)++] = 0x8D;
+                bin_buffer[(*bin_idx)++] = (uint8_t)(0x85 | (reg << 3));
+                memcpy(&bin_buffer[*bin_idx], &rbp_disp, 4);
+                *bin_idx += 4;
+                nano_print("   [ASM] lea reg, [rbp - off] -> opcod generat\n");
+            }
+            return 7;
+        }
+    }
+
+    // --- MOVSS XMM0..XMM7, [RBP-OFFSET] ---
+    if (strcmp(inst->mnemonic, "movss") == 0 && strncmp(inst->op1, "xmm", 3) == 0 && parse_rbp_offset(inst->op2, &rbp_disp)) {
+        int xmm_idx = inst->op1[3] - '0';
+        if (xmm_idx >= 0 && xmm_idx <= 7) {
+            if (bin_buffer) {
+                bin_buffer[(*bin_idx)++] = 0xF3;
+                bin_buffer[(*bin_idx)++] = 0x0F;
+                bin_buffer[(*bin_idx)++] = 0x10;
+                bin_buffer[(*bin_idx)++] = (uint8_t)(0x85 | (xmm_idx << 3));
+                memcpy(&bin_buffer[*bin_idx], &rbp_disp, 4);
+                *bin_idx += 4;
+                nano_print("   [ASM] movss xmm, [rbp-off] -> opcod generat\n");
+            }
+            return 8;
+        }
+    }
+
+    // --- MOVSS [RBP - OFFSET], XMM0..XMM3 ---
+    if (strcmp(inst->mnemonic, "movss") == 0 && parse_rbp_offset(inst->op1, &rbp_disp) && strncmp(inst->op2, "xmm", 3) == 0) {
+        int xmm_idx = inst->op2[3] - '0';
+        if (xmm_idx >= 0 && xmm_idx <= 7) {
+            if (bin_buffer) {
+                bin_buffer[(*bin_idx)++] = 0xF3;
+                bin_buffer[(*bin_idx)++] = 0x0F;
+                bin_buffer[(*bin_idx)++] = 0x11;
+                bin_buffer[(*bin_idx)++] = (uint8_t)(0x85 | (xmm_idx << 3));
+                memcpy(&bin_buffer[*bin_idx], &rbp_disp, 4);
+                *bin_idx += 4;
+                nano_print("   [ASM] movss [rbp - off], xmm -> opcod generat\n");
+            }
+            return 8;
+        }
+    }
+
 
     // --- PRINT "text" ---
     if (strcmp(inst->mnemonic, "print") == 0) {
@@ -706,19 +822,31 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
 
     // --- CMP ---
     if (strcmp(inst->mnemonic, "cmp") == 0) {
-        if (strcmp(inst->op1, "rdi") == 0) {
-            int val = atoi(inst->op2);
-            if (bin_buffer) {
-                bin_buffer[(*bin_idx)++] = 0x48;
-                bin_buffer[(*bin_idx)++] = 0x81;
-                bin_buffer[(*bin_idx)++] = 0xFF;
-                bin_buffer[(*bin_idx)++] = (uint8_t)(val & 0xFF);
-                bin_buffer[(*bin_idx)++] = (uint8_t)((val >> 8) & 0xFF);
-                bin_buffer[(*bin_idx)++] = (uint8_t)((val >> 16) & 0xFF);
-                bin_buffer[(*bin_idx)++] = (uint8_t)((val >> 24) & 0xFF);
-                nano_print("  [ASM] cmp rdi, val -> opcod generat\n");
+        int dest_reg = get_reg_code(inst->op1);
+        if (dest_reg != -1) {
+            int src_reg = get_reg_code(inst->op2);
+            if (src_reg != -1) {
+                // cmp reg1, reg2 -> 3 octeți (REX.W + 0x39 + ModRM)
+                if (bin_buffer) {
+                    bin_buffer[(*bin_idx)++] = 0x48;
+                    bin_buffer[(*bin_idx)++] = 0x39;
+                    bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 | (src_reg << 3) | dest_reg);
+                    nano_print("   [ASM] cmp reg, reg -> opcod generat\n");
+                }
+                return 3;
+            } else {
+                // cmp reg, imm32 -> 7 octeți (REX.W + 0x81 + ModRM + imm32)
+                int32_t val = (int32_t)atoi(inst->op2);
+                if (bin_buffer) {
+                    bin_buffer[(*bin_idx)++] = 0x48;
+                    bin_buffer[(*bin_idx)++] = 0x81;
+                    bin_buffer[(*bin_idx)++] = (uint8_t)(0xF8 | dest_reg);
+                    memcpy(&bin_buffer[*bin_idx], &val, 4);
+                    *bin_idx += 4;
+                    nano_print("   [ASM] cmp reg, imm32 -> opcod generat\n");
+                }
+                return 7;
             }
-            return 7;
         }
     }
 
@@ -1348,6 +1476,35 @@ int process_instruction(Instruction* inst, uint8_t* bin_buffer, int* bin_idx, La
             }
         }
     }
+	
+	// --- MOVQ între RAX și XMM0..XMM3 (pentru push/pop la argumente float) ---
+    if (strcmp(inst->mnemonic, "movq") == 0) {
+        if (strcmp(inst->op1, "rax") == 0 && strcmp(inst->op2, "xmm0") == 0) {
+            if (bin_buffer) {
+                bin_buffer[(*bin_idx)++] = 0x66;
+                bin_buffer[(*bin_idx)++] = 0x48;
+                bin_buffer[(*bin_idx)++] = 0x0F;
+                bin_buffer[(*bin_idx)++] = 0x7E;
+                bin_buffer[(*bin_idx)++] = 0xC0;
+                nano_print("   [ASM] movq rax, xmm0 -> opcod generat\n");
+            }
+            return 5;
+        }
+        if (strncmp(inst->op1, "xmm", 3) == 0 && strcmp(inst->op2, "rax") == 0) {
+            int xmm_idx = inst->op1[3] - '0';
+            if (xmm_idx >= 0 && xmm_idx <= 7) {
+                if (bin_buffer) {
+                    bin_buffer[(*bin_idx)++] = 0x66;
+                    bin_buffer[(*bin_idx)++] = 0x48;
+                    bin_buffer[(*bin_idx)++] = 0x0F;
+                    bin_buffer[(*bin_idx)++] = 0x6E;
+                    bin_buffer[(*bin_idx)++] = (uint8_t)(0xC0 | (xmm_idx << 3));
+                    nano_print("   [ASM] movq xmm, rax -> opcod generat\n");
+                }
+                return 5;
+            }
+        }
+    }
 
     return -1;
 }
@@ -1387,13 +1544,13 @@ int main(int argc, char* argv[]) {
         nano_print("NanoASM v2.0 -> Mod Generare: Nativ Nano OS (NAS1)\n");
     }
 
-    uint8_t* src_buffer = (uint8_t*)nano_malloc(8192);
+    uint8_t* src_buffer = (uint8_t*)nano_malloc(65536);
     if (!src_buffer) {
         nano_print("Eroare: Fara memorie pentru src_buffer!\n");
         return 0;
     }
     
-    int bytes_read = nano_read_file(src_file, src_buffer, 8191);
+    int bytes_read = nano_read_file(src_file, src_buffer, 65535);
     if (bytes_read <= 0) {
         nano_print("Eroare la citirea fisierului sursa!\n");
         nano_free(src_buffer);

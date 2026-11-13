@@ -1,13 +1,15 @@
-int main() {
-    char *s = "Mimi";
-    print(s[0]); 
+void afiseaza_linie(char* eticheta, int valoare);
 
-    s[0] = 'N';  
-    print(s);    
+void main(void) {
+    afiseaza_linie("Scor:", 42);
+    afiseaza_linie("Stop:", -1);
+}
 
-    for(int i=0; i<5; ++i) { 
-        print(s[i]); 
+void afiseaza_linie(char* eticheta, int valoare) {
+    if (valoare < 0) {
+        print("Valoare invalida!");
+        return;
     }
-    
-    return 0;
+    print(eticheta);
+    print(valoare);
 }

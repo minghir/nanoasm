@@ -3,4 +3,4 @@ all: clean
 	gcc cc.c nano_libc_host.c -o cc -Wall -Wextra
 
 clean:
-	rm -f ./asm ./out ./cc
+	rm -f ./asm ./out ./cc ./*.s ./*.o
